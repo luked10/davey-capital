@@ -1,10 +1,1 @@
-swarms
-pydantic
-loguru
-swarm-models
-fastapi
-uvicorn
-requests
-httpx
-solders
-robin-stocks
+# moved to autohedge/requirements.txt

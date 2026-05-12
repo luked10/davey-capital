@@ -2,76 +2,57 @@
 
 [![Join our Discord](https://img.shields.io/badge/Discord-Join%20our%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/VapjxpSyHC3) [![Subscribe on YouTube](https://img.shields.io/badge/YouTube-Subscribe-red?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@kyegomez3242) [![Connect on LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/kye-g-38759a207/) [![Follow on X.com](https://img.shields.io/badge/X.com-Follow-1DA1F2?style=for-the-badge&logo=x&logoColor=white)](https://x.com/swarms_corp)
 
+AutoHedge is an enterprise-grade autonomous agent hedge fund that trades on your behalf. It now uses a stateless boi architecture: session checkpoints, decision logs, and fill reports are written to disk or repo state, and broker adapters are selected from a shared contract.
 
-AutoHedge is an enterprise-grade autonomous agent hedge fund that trades on your behalf. It combines swarm intelligence and specialized AI agents to perform end-to-end market analysis, risk management, and execution with minimal human intervention.
-
-**Current support:** Full autonomous trading on Solana. **Coming soon:** Coinbase and additional exchanges.
-
----
-
-## Overview
-
-AutoHedge is built to be the world's most powerful autonomous agent hedge fund. It runs continuous analysis, generates and validates trading theses, sizes risk, and executes orders across supported venues. The system is designed for institutional reliability: structured outputs, comprehensive logging, and a risk-first architecture that scales from single strategies to multi-venue, multi-asset deployment.
+Current support: Robinhood and Solana adapters. Robinhood supports stock and crypto routing through the shared broker boi interface.
 
 ---
 
-## Features
+## Setup
 
-- **Multi-Agent Architecture**: Specialized agents for each stage of the trading pipeline
-  - Director Agent: strategy and thesis generation
-  - Quant Agent: technical and statistical analysis
-  - Risk Management Agent: position sizing and risk assessment
-  - Execution Agent: order generation and execution
-
-- **Real-Time Market Analysis**: Integration with live market data for analysis and execution
-- **Risk-First Design**: Built-in risk management and position sizing before any execution
-- **Structured Output**: JSON-formatted recommendations and analysis for downstream systems
-- **Enterprise Logging**: Detailed, configurable logging for audit and debugging
-- **Extensible Framework**: Modular design for custom strategies and new venues
-
----
-
-## Supported Venues
-
-| Venue      | Status        | Notes                    |
-|-----------|----------------|--------------------------|
-| Solana    | Supported      | Full autonomous trading  |
-| Coinbase  | Coming soon    | In development           |
-| Other CEX | Roadmap        | Planned expansion        |
-
----
-
-## Quick Start
-
-### Installation
+### 1. Install dependencies
 
 ```bash
-pip install -U autohedge
+cd autohedge
+poetry install
 ```
 
-### Environment Variables
+### 2. Copy env vars
 
 ```bash
-# Jupiter API (token price & search tools)
-# Get a key at https://portal.jup.ag
-JUPITER_API_KEY=
-
-# OpenAI (experimental agents)
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-WORKSPACE_DIR="agent_workspace"
-
-# Trading
-WALLET_PRIVATE_KEY=""
+cp .env.example .env
 ```
 
-See `.env.example` for a full reference.
+### 3. Configure Robinhood
 
-### Basic Usage
+Set:
+- ROBINHOOD_USERNAME
+- ROBINHOOD_PASSWORD
+- ROBINHOOD_MFA_CODE if your account uses MFA
+- ROBINHOOD_SESSION_PICKLE_PATH for persistent login sessions
+- ROBINHOOD_STATE_PATH for saved account metadata
+- ROBINHOOD_DEVICE_TOKEN optional
+- ROBINHOOD_CLIENT_ID optional for direct OAuth-style token exchange
 
-```python
-autohedge 
+### 4. Run AutoHedge
+
+```bash
+autohedge
 ```
+
+### 5. Select the broker boi
+
+Use the Robinhood adapter through get_broker_boi('robinhood', ...) or from the execution layer that calls the broker factory.
+
+---
+
+## Persistent Robinhood flow
+
+1. The adapter reads Robinhood credentials from env or config.
+2. It logs in through the Robinhood client and stores the session pickle path.
+3. It persists state to ROBINHOOD_STATE_PATH so the next run can reuse account metadata.
+4. Stock and crypto orders are routed through the same broker contract with asset_class='stock' or asset_class='crypto'.
+5. Positions, fills, and account snapshots are written back through the same interface.
 
 ---
 
@@ -86,38 +67,3 @@ graph TD
     C --> D[Execution Agent]
     D --> E[Trade Output]
 ```
-
----
-
-## Contributing
-
-Contributions are welcome. See [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## Acknowledgments
-
-- [Swarms](https://swarms.ai) for the AI agent framework
-
----
-
-## Support
-
-- Issue Tracker: [GitHub Issues](https://github.com/The-Swarm-Corporation/AutoHedge/issues)
-- Community: [Discord](https://swarms.ai)
-
----
-
-AutoHedge by [The Swarm Corporation](https://github.com/The-Swarm-Corporation)

@@ -10,6 +10,7 @@ class BrokerOrderBoi:
     symbol: str
     side: str
     quantity: float
+    asset_class: str = 'stock'
     order_type: str = 'market'
     limit_price: float | None = None
     time_in_force: str = 'day'
@@ -25,6 +26,7 @@ class BrokerFillBoi:
     price: float | None = None
     fee: float | None = None
     status: str = 'filled'
+    asset_class: str = 'stock'
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -34,6 +36,7 @@ class BrokerPositionBoi:
     quantity: float
     average_entry_price: float | None = None
     mark_price: float | None = None
+    asset_class: str = 'stock'
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -50,7 +53,12 @@ class AccountSnapshotBoi:
 class BrokerBoi(ABC):
     broker_name = 'unknown'
 
-    def __init__(self, *, session_id: str | None = None, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
         self.session_id = session_id
         self.config = config or {}
 
