@@ -83,7 +83,7 @@ There are several loops that should be made more deliberate.
    - The interactive run loop and the swarm dashboard loop both rely on fixed sleep polling.
    - Replace the dashboard refresh loop with an event-driven update path, or at least a configurable refresh interval that can be tuned per mode.
    - The session timer thread should be collapsed into a shared timer utility so prompt UI, CLI, and API all use the same cadence logic.
-   - The `time.sleep(0.25)` loop in the swarm dashboard is a good target for a shared runner abstraction.
+   - The time.sleep(0.25) loop in the swarm dashboard is a good target for a shared runner abstraction.
 
 2. autohedge/autohedge/cli.py
    - The REPL creates a new AutoHedge object per task.
@@ -144,3 +144,10 @@ If this were being executed in phases, I would start with:
 - nova-alpha reporting automation last
 
 That sequence gives the highest performance payoff without breaking the bridge between signal generation and execution.
+
+## Next steps from the current plan
+- verify execution
+- confirm dashboard ui
+- formal squad intake
+- notion logger setup
+- 13F prep
