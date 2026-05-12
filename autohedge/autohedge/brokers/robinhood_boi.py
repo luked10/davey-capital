@@ -82,6 +82,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
         self.state = self.state_store.load()
         self.rh = self._import_robinhood_client()
         self.auth_payload: dict[str, Any] = {}
+        self._prepare_storage_paths()
         self._login()
 
     def _read_setting(self, *keys: str, default: str = '') -> str:
@@ -97,6 +98,11 @@ class RobinhoodBrokerBoi(BrokerBoi):
             if value:
                 return value
         return default
+
+    def _prepare_storage_paths(self) -> None:
+        for target in (self.session_pickle_path, self.state_path):
+            path = target if not target.suffix else target.parent
+            path.mkdir(parents=True, exist_ok=True)
 
     def _import_robinhood_client(self):
         try:
@@ -127,13 +133,23 @@ class RobinhoodBrokerBoi(BrokerBoi):
             login_kwargs['client_id'] = self.client_id
 
         try:
-            self.auth_payload = self.rh.login(**login_kwargs)
+            auth_payload = self.rh.login(**login_kwargs)
         except TypeError:
             fallback_kwargs = dict(login_kwargs)
             fallback_kwargs.pop('pickle_name', None)
             fallback_kwargs.pop('client_id', None)
             fallback_kwargs.pop('device_token', None)
-            self.auth_payload = self.rh.login(**fallback_kwargs)
+            auth_payload = self.rh.login(**fallback_kwargs)
+
+        if isinstance(auth_payload, dict):
+            self.auth_payload = auth_payload
+        elif auth_payload is None:
+            self.auth_payload = {}
+        else:
+            try:
+                self.auth_payload = dict(auth_payload)
+            except Exception:
+                self.auth_payload = {'value': auth_payload}
 
         self.state = RobinhoodStateBoi(
             username=self.username,
