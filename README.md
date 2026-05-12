@@ -1,25 +1,24 @@
 # quant-hub-bridge
 
-Bridge repo for Vibe-Trading signal generation and AutoHedge execution.
+Consolidated bridge for signal generation, execution, and logging.
 
-## Structure
+## Layout
 
-- `vibe-trading/` — signal generation, strategy research, and pre-trade analytics
-- `autohedge/` — execution, routing, sizing, and risk controls
-- `logs/` — execution artifacts, run logs, and handoff records
+- `vibe-trading/` — signal generation and research modules from Vibe-Trading
+- `autohedge/` — execution and routing modules from AutoHedge
+- `nova-alpha/` — supplemental signal logic and notes from nova-alpha-signals
+- `logs/` — bridge-level execution logs
 
-## Signal -> Execution flow
+## Flow
 
-1. Vibe-Trading produces a signal with the strategy, asset, direction, and context.
-2. AutoHedge consumes that signal, validates it against risk rules, and routes execution.
-3. Execution status and outcome are written back into Notion.
+1. Vibe-Trading emits a signal.
+2. AutoHedge validates and executes it.
+3. Nova Alpha can contribute supplemental signals or filters.
+4. Notion remains the live status dashboard for handoffs, execution status, and outcomes.
 
-## Logging and communication
+## Status logging
 
-Notion is the live status dashboard for the GitHub-based execution workflow.
-
-Use the `Trading & Performance Log` database to track:
-
+Use the Notion database `Trading & Performance Log` to track:
 - Date
 - Strategy
 - Asset
@@ -29,4 +28,4 @@ Use the `Trading & Performance Log` database to track:
 - System Status
 - Communication Log
 
-The `System Status` / `Communication Log` fields are the internal handoff layer between Vibe-Trading and AutoHedge, while this repo holds the execution modules and supporting logs.
+The `System Status` and `Communication Log` fields are the internal handoff layer between signal generation and execution.
