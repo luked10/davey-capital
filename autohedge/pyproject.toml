@@ -35,6 +35,7 @@ httpx = "*"
 solders = "*"
 yfinance = "*"
 python-dotenv = "*"
+robin-stocks = "*"
 
 
 [tool.poetry.group.lint.dependencies]
