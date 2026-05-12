@@ -1,31 +1,45 @@
 # quant-hub-bridge
 
-Consolidated bridge for signal generation, execution, and logging.
+Stateless trading bridge. The repository is the source of truth for workflow checkpoints, decisions, fills, and broker wiring.
 
-## Layout
+## Operating model
 
-- `vibe-trading/` — signal generation and research modules from Vibe-Trading
-- `autohedge/` — execution and routing modules from AutoHedge
-- `nova-alpha/` — supplemental signal logic and notes from nova-alpha-signals
-- `logs/` — bridge-level execution logs
+- No hidden memory or off-repo state is assumed.
+- Each trading day is recorded through session files under sessions/.
+- Decisions and fills are written back into the repo so the audit trail stays versioned.
 
-## Flow
+## Daily checkpoints
 
-1. Vibe-Trading emits a signal.
-2. AutoHedge validates and executes it.
-3. Nova Alpha can contribute supplemental signals or filters.
-4. Notion remains the live status dashboard for handoffs, execution status, and outcomes.
+- sessions/pre_market_boi.md
+- sessions/execution_boi.md
+- sessions/midday_boi.md
+- sessions/close_boi.md
 
-## Status logging
+## Audit trail templates
 
-Use the Notion database `Trading & Performance Log` to track:
-- Date
-- Strategy
-- Asset
-- Signal Type
-- Result
-- Notes
-- System Status
-- Communication Log
+- sessions/decision_log_boi.md
+- sessions/fill_report_boi.md
 
-The `System Status` and `Communication Log` fields are the internal handoff layer between signal generation and execution.
+## Broker abstraction layer
+
+- autohedge/autohedge/brokers/base_boi.py
+- autohedge/autohedge/brokers/robinhood_boi.py
+- autohedge/autohedge/brokers/solana_boi.py
+- autohedge/autohedge/brokers/factory_boi.py
+
+The adapter layer keeps broker-specific behavior behind a shared contract so execution can switch between Robinhood and Solana without changing the rest of the workflow.
+
+## Repository layout
+
+- vibe-trading/ — signal generation and research modules
+- autohedge/ — execution and routing modules
+- nova-alpha/ — supplemental signal logic and notes
+- logs/ — bridge-level execution logs
+- sessions/ — daily stateless checkpoints and audit templates
+
+## Workflow
+
+1. Research and signals can be generated anywhere in the repo.
+2. The session files capture the plan before execution.
+3. Broker adapters resolve the active execution venue.
+4. Fills and decisions are recorded back into sessions/ and logs/.
