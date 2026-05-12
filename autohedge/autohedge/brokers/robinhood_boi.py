@@ -55,21 +55,27 @@ class RobinhoodBrokerBoi(BrokerBoi):
     ) -> None:
         _load_dotenv_if_available()
         super().__init__(session_id=session_id, config=config)
-        self.username = self._read_setting('ROBINHOOD_USERNAME')
-        self.password = self._read_setting('ROBINHOOD_PASSWORD')
-        self.mfa_code = self._read_setting('ROBINHOOD_MFA_CODE')
+        self.username = self._read_setting(
+            'ROBINHOOD_USERNAME', 'ROBINHOODUSERNAME'
+        )
+        self.password = self._read_setting(
+            'ROBINHOOD_PASSWORD', 'ROBINHOODPASSWORD'
+        )
+        self.mfa_code = self._read_setting(
+            'ROBINHOOD_MFA_CODE', 'ROBINHOODMFACODE'
+        )
         self.device_token = self._read_setting('ROBINHOOD_DEVICE_TOKEN')
         self.client_id = self._read_setting('ROBINHOOD_CLIENT_ID')
         self.session_pickle_path = Path(
             self._read_setting(
                 'ROBINHOOD_SESSION_PICKLE_PATH',
-                '.autohedge/robinhood_session_boi.pkl',
+                default='.autohedge/robinhood_session_boi.pkl',
             )
         )
         self.state_path = Path(
             self._read_setting(
                 'ROBINHOOD_STATE_PATH',
-                '.autohedge/robinhood_state_boi.json',
+                default='.autohedge/robinhood_state_boi.json',
             )
         )
         self.state_store = RobinhoodStateStoreBoi(self.state_path)
@@ -78,14 +84,19 @@ class RobinhoodBrokerBoi(BrokerBoi):
         self.auth_payload: dict[str, Any] = {}
         self._login()
 
-    def _read_setting(self, key: str, default: str = '') -> str:
-        value = self.config.get(key.lower()) if self.config else None
-        if value:
-            return str(value)
-        value = self.config.get(key) if self.config else None
-        if value:
-            return str(value)
-        return os.getenv(key, default)
+    def _read_setting(self, *keys: str, default: str = '') -> str:
+        for key in keys:
+            if self.config:
+                value = self.config.get(key.lower())
+                if value:
+                    return str(value)
+                value = self.config.get(key)
+                if value:
+                    return str(value)
+            value = os.getenv(key)
+            if value:
+                return value
+        return default
 
     def _import_robinhood_client(self):
         try:
