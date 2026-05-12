@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Any
 
 
@@ -45,6 +45,10 @@ class AccountSnapshotBoi:
     buying_power: float | None = None
     positions: list[BrokerPositionBoi] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 class BrokerBoi(ABC):
