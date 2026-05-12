@@ -5,6 +5,7 @@ This folder is the daily source-of-truth for trading workflow checkpoints and th
 ## Checkpoints
 
 - pre_market_boi.md
+- planning_boi.md
 - execution_boi.md
 - midday_boi.md
 - close_boi.md
