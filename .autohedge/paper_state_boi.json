@@ -1,0 +1,50 @@
+{
+  "broker_name": "paper",
+  "state_path": ".autohedge/paper_state_boi.json",
+  "starting_cash": 100000,
+  "cash_balance": 99058,
+  "positions": [
+    {
+      "symbol": "CRDO",
+      "quantity": 5,
+      "average_entry_price": 188.4,
+      "mark_price": 188.4,
+      "asset_class": "stock",
+      "metadata": {
+        "note": "small starter paper position",
+        "source": "starter fill approved by Luke"
+      }
+    }
+  ],
+  "open_orders": [],
+  "fills": [
+    {
+      "fill_id": "paper-fill-1",
+      "order_id": "paper-order-1",
+      "symbol": "CRDO",
+      "side": "buy",
+      "quantity": 5,
+      "price": 188.4,
+      "fee": 0,
+      "status": "filled",
+      "asset_class": "stock",
+      "timestamp": "2026-05-13T15:53:04Z",
+      "metadata": {
+        "order_type": "market",
+        "session": "paper_execution_session_boi",
+        "starter_position": true
+      }
+    }
+  ],
+  "last_prices": {
+    "CRDO": 188.4
+  },
+  "next_order_id": 2,
+  "next_fill_id": 2,
+  "last_updated_at": "2026-05-13T15:53:04Z",
+  "metadata": {
+    "session": "paper_execution_session_boi",
+    "strategy": "Davey Capital paper session",
+    "notes": "CRDO starter fill recorded after catalyst and momentum review"
+  }
+}
