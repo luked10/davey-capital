@@ -2,7 +2,7 @@
   "broker_name": "paper",
   "state_path": ".autohedge/paper_state_boi.json",
   "starting_cash": 100000,
-  "cash_balance": 99058,
+  "cash_balance": 98661,
   "positions": [
     {
       "symbol": "CRDO",
@@ -12,7 +12,20 @@
       "asset_class": "stock",
       "metadata": {
         "note": "small starter paper position",
-        "source": "starter fill approved by Luke"
+        "source": "starter fill approved by Luke",
+        "real_money_conviction": true
+      }
+    },
+    {
+      "symbol": "SLV",
+      "quantity": 5,
+      "average_entry_price": 79.4,
+      "mark_price": 79.4,
+      "asset_class": "stock",
+      "metadata": {
+        "note": "small starter paper position",
+        "source": "silver hedge + momentum starter fill",
+        "real_money_conviction": true
       }
     }
   ],
@@ -32,19 +45,41 @@
       "metadata": {
         "order_type": "market",
         "session": "paper_execution_session_boi",
-        "starter_position": true
+        "starter_position": true,
+        "real_money_conviction": true
+      }
+    },
+    {
+      "fill_id": "paper-fill-2",
+      "order_id": "paper-order-2",
+      "symbol": "SLV",
+      "side": "buy",
+      "quantity": 5,
+      "price": 79.4,
+      "fee": 0,
+      "status": "filled",
+      "asset_class": "stock",
+      "timestamp": "2026-05-13T23:41:00Z",
+      "metadata": {
+        "order_type": "market",
+        "session": "paper_execution_session_boi",
+        "starter_position": true,
+        "real_money_conviction": true,
+        "thesis": "silver hedge + momentum"
       }
     }
   ],
   "last_prices": {
-    "CRDO": 188.4
+    "CRDO": 188.4,
+    "SLV": 79.4
   },
-  "next_order_id": 2,
-  "next_fill_id": 2,
-  "last_updated_at": "2026-05-13T15:53:04Z",
+  "next_order_id": 3,
+  "next_fill_id": 3,
+  "last_updated_at": "2026-05-13T23:41:00Z",
   "metadata": {
     "session": "paper_execution_session_boi",
     "strategy": "Davey Capital paper session",
-    "notes": "CRDO starter fill recorded after catalyst and momentum review"
+    "notes": "CRDO and SLV starter fills recorded after catalyst and momentum review",
+    "conviction_flag": "real-money-conviction"
   }
 }
