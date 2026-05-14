@@ -17,6 +17,11 @@ try:
 except ImportError:
     ChatOpenAI = None  # type: ignore
 
+try:
+    from langchain_anthropic import ChatAnthropic
+except ImportError:
+    ChatAnthropic = None  # type: ignore
+
 
 if ChatOpenAI is not None:
     class ChatOpenAIWithReasoning(ChatOpenAI):  # type: ignore[misc,valid-type]
@@ -142,6 +147,17 @@ def _sync_provider_env() -> None:
         os.environ.pop("OPENAI_API_KEY", None)
         return
 
+    if provider == "anthropic":
+        # ChatAnthropic reads ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL directly;
+        # no mapping to OPENAI_* env vars is needed.
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if api_key:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "")
+        if base_url:
+            os.environ["ANTHROPIC_BASE_URL"] = base_url
+        return
+
     # (api_key_env, base_url_env)
     _PROVIDER_MAP: dict[str, tuple[str | None, str]] = {
         "openai":     ("OPENAI_API_KEY",     "OPENAI_BASE_URL"),
@@ -207,6 +223,25 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             timeout=int(os.getenv("TIMEOUT_SECONDS", "120")),
             reasoning_effort=effort or None,
         )
+
+    if provider == "anthropic":
+        if ChatAnthropic is None:
+            raise RuntimeError("langchain-anthropic is not installed; run: pip install langchain-anthropic")
+        kwargs: dict[str, Any] = dict(
+            model_name=name,
+            temperature=temperature,
+            timeout=int(os.getenv("TIMEOUT_SECONDS", "120")),
+            max_retries=int(os.getenv("MAX_RETRIES", "2")),
+        )
+        if callbacks:
+            kwargs["callbacks"] = callbacks
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if api_key:
+            kwargs["anthropic_api_key"] = api_key
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "")
+        if base_url:
+            kwargs["anthropic_api_url"] = base_url
+        return ChatAnthropic(**kwargs)  # type: ignore[call-arg]
 
     if ChatOpenAI is None:
         raise RuntimeError("langchain-openai is not installed")
