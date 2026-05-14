@@ -53,7 +53,6 @@ def _check_llm_provider() -> CheckResult:
         )
 
     _sync_provider_env()
-    base_url = os.getenv("OPENAI_BASE_URL", "") or os.getenv("OPENAI_API_BASE", "")
 
     if provider.lower() in {"openai-codex", "openai_codex"}:
         try:
@@ -84,6 +83,38 @@ def _check_llm_provider() -> CheckResult:
             impact="",
         )
 
+    if provider.lower() == "anthropic":
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            return CheckResult(
+                name=f"LLM ({provider})",
+                status="not_configured",
+                message="ANTHROPIC_API_KEY not set",
+                impact="agent cannot function",
+                critical=True,
+            )
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        try:
+            import requests
+
+            ping_url = base_url.rstrip("/")
+            requests.get(ping_url, timeout=10)
+            return CheckResult(
+                name=f"LLM ({provider})",
+                status="ready",
+                message=f"{model} via {base_url}",
+                impact="",
+            )
+        except Exception as exc:
+            return CheckResult(
+                name=f"LLM ({provider})",
+                status="error",
+                message=f"{type(exc).__name__}: {exc}",
+                impact="agent cannot function",
+                critical=True,
+            )
+
+    base_url = os.getenv("OPENAI_BASE_URL", "") or os.getenv("OPENAI_API_BASE", "")
     if not base_url:
         return CheckResult(
             name=f"LLM ({provider})",
