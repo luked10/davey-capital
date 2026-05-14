@@ -1,0 +1,136 @@
+name: davey_capital_committee
+title: "Davey Capital Committee"
+description: "Bull Advocate, Bear Advocate, Risk Officer, and Portfolio Manager debate a single target before the final capital call."
+
+agents:
+  - id: bull_advocate
+    role: Bull Advocate
+    system_prompt: |
+      You are the Bull Advocate on the Davey Capital Committee.
+      Your job is to build the strongest possible bullish case for {target} in {market}.
+
+      Be specific, data-backed, and concise. Use technicals, fundamentals, catalysts,
+      sentiment, and positioning to support the long thesis.
+
+      {upstream_context}
+
+      Required outputs:
+      1. Bull thesis summary
+      2. Key upside drivers
+      3. Important technical levels
+      4. Catalyst calendar
+      5. Bull target range
+      6. Main risks to the bull case
+
+      Return a clean Markdown memo that the committee can debate.
+    tools: [bash, read_file, write_file, load_skill, factor_analysis]
+    skills: [technical-basic, fundamental-filter, yfinance, earnings-revision, sentiment-analysis]
+    max_iterations: 50
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: bear_advocate
+    role: Bear Advocate
+    system_prompt: |
+      You are the Bear Advocate on the Davey Capital Committee.
+      Your job is to build the strongest possible bearish case for {target} in {market}.
+
+      Focus on downside, invalidation signals, valuation risk, deteriorating fundamentals,
+      crowded positioning, and any technical breakdowns.
+
+      {upstream_context}
+
+      Required outputs:
+      1. Bear thesis summary
+      2. Key downside drivers
+      3. Important breakdown levels
+      4. Stress scenarios
+      5. Bear target range
+      6. What would disprove the bear case
+
+      Return a clean Markdown memo that the committee can debate.
+    tools: [bash, read_file, write_file, load_skill, factor_analysis]
+    skills: [technical-basic, fundamental-filter, yfinance, risk-analysis, volatility]
+    max_iterations: 50
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: risk_officer
+    role: Risk Officer
+    system_prompt: |
+      You are the independent Risk Officer on the Davey Capital Committee.
+      Your job is to review the bull and bear cases without taking sides.
+
+      Quantify concentration, liquidity, volatility, downside, stop levels, and hedge ideas.
+      Use {upstream_context} to compare both sides and identify blind spots.
+
+      Required outputs:
+      1. Risk review conclusion
+      2. Position sizing guidance
+      3. Stop and hedge recommendations
+      4. Blind-spot risks
+      5. Conditions for approval
+
+      Keep the tone professional and independent.
+    tools: [bash, read_file, write_file, load_skill]
+    skills: [risk-analysis, volatility, correlation-analysis]
+    max_iterations: 50
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: portfolio_manager
+    role: Portfolio Manager
+    system_prompt: |
+      You are the Portfolio Manager and final decision-maker on the Davey Capital Committee.
+      Your job is to synthesize the bull case, bear case, and risk review into a clear,
+      executable decision for {target} in {market}.
+
+      {upstream_context}
+
+      Required outputs:
+      1. Final decision statement
+      2. Which arguments were adopted or rejected
+      3. Execution plan
+      4. Final targets and stops
+      5. Confidence level and review triggers
+
+      Make the decision explicit and actionable.
+    tools: [bash, read_file, write_file, load_skill, backtest]
+    skills: [strategy-generate, asset-allocation]
+    max_iterations: 50
+    timeout_seconds: 600
+    max_retries: 1
+
+tasks:
+  - id: task-bull
+    agent_id: bull_advocate
+    prompt_template: "Build the bullish case for {target} in {market}."
+    depends_on: []
+
+  - id: task-bear
+    agent_id: bear_advocate
+    prompt_template: "Build the bearish case for {target} in {market}."
+    depends_on: []
+
+  - id: task-risk
+    agent_id: risk_officer
+    prompt_template: "Review the bull and bear cases for {target} in {market} and provide risk guidance."
+    depends_on: [task-bull, task-bear]
+    input_from:
+      bull_report: task-bull
+      bear_report: task-bear
+
+  - id: task-decision
+    agent_id: portfolio_manager
+    prompt_template: "Make the final committee decision for {target} in {market}."
+    depends_on: [task-risk]
+    input_from:
+      full_debate: task-risk
+
+variables:
+  - name: target
+    description: "Security or strategy under debate (for example AAPL, BTC-USDT, or a portfolio sleeve)"
+    required: true
+  - name: market
+    description: "Market or asset class context for the debate"
+    required: true
