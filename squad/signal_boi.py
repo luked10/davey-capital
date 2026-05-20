@@ -27,9 +27,29 @@ TOOLS = [
 ]
 
 LOGIC = {
-    'purpose': 'Create filtered signals for downstream risk and execution',
+    'purpose': 'Create filtered monitoring candidates for downstream risk review',
+    'mode': 'monitoring_only_non_executing',
+    'execution_gate': 'do_not_route_orders_until_risk_sizing_approval',
     'signal_types': ['long', 'short', 'hedge', 'exit', 'wait'],
     'outputs': ['structured signal', 'rationale', 'confidence', 'filter notes'],
+    'selection_lanes': {
+        'biotech': {
+            'primary': ['CMPS', 'GHRS', 'MNMD', 'DFTX'],
+            'secondary': ['VRDN', 'ATRA', 'DNL'],
+            'entry_filter': 'fresh catalyst + liquidity confirmation; avoid dead tape or invalidating binary risk',
+        },
+        'quantum': {
+            'primary': ['IONQ', 'RGTI', 'QBTS', 'QUBT'],
+            'secondary': ['INFQ'],
+            'entry_filter': 'partner validation or roadmap headline + trend reclaim; avoid dead tape',
+        },
+        'photonics': {
+            'primary': ['LITE', 'COHR', 'AAOI'],
+            'secondary': ['FN', 'MTSI', 'CIEN'],
+            'entry_filter': 'fresh ai-infra/optics catalyst + trend/breadth confirmation; avoid dead tape',
+        },
+    },
+    'paper_fill_priority': ['AAOI', 'CMPS', 'MNMD', 'IONQ', 'INFQ'],
 }
 
 AGENT_SPEC = {
