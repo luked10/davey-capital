@@ -3,6 +3,7 @@
 Supports ``source="auto"`` to route codes to loaders by symbol format.
 Supports ``interval`` for bar size (1m/5m/15m/30m/1H/4H/1D, default 1D).
 Supports ``engine`` for backtest engine (daily/options, default daily).
+Supports optional ``risk_gates`` config for dividend-quality and stress-test checks.
 
 Usage: ``python -m backtest.runner <run_dir>``
 """
