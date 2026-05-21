@@ -30,6 +30,7 @@ from backtest.metrics import (
     calc_metrics,
 )
 from backtest.models import EquitySnapshot, Position, TradeRecord
+from backtest.risk_controls import apply_risk_gates
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +336,9 @@ class BaseEngine(ABC):
 
         # 2. Generate signals
         signal_map = signal_engine.generate(data_map)
+        risk_gate_results: dict[str, Any] = {}
+        if config.get("risk_gates"):
+            signal_map, risk_gate_results = apply_risk_gates(config, data_map, signal_map)
         valid_codes = sorted(c for c in signal_map if c in data_map)
         if not valid_codes:
             print(json.dumps({"error": "No valid signals generated"}))
@@ -398,6 +402,11 @@ class BaseEngine(ABC):
             # Write validation.json artifact
             v_path = run_dir / "artifacts" / "validation.json"
             v_path.write_text(json.dumps(v_results, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        if risk_gate_results:
+            m["risk_gates"] = risk_gate_results
+            rg_path = run_dir / "artifacts" / "risk_gates.json"
+            rg_path.write_text(json.dumps(risk_gate_results, indent=2, ensure_ascii=False), encoding="utf-8")
 
         # 8. Artifacts
         self._write_artifacts(
