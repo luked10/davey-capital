@@ -14,7 +14,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, model_validator, field_validator
@@ -52,6 +52,7 @@ class BacktestConfigSchema(BaseModel):
     interval: str = "1D"
     engine: str = "daily"
     fundamental_fields: Optional[Dict[str, List[str]]] = None
+    risk_gates: Optional[Dict[str, Any]] = None
 
     @field_validator("codes")
     @classmethod
@@ -105,6 +106,15 @@ class BacktestConfigSchema(BaseModel):
                 raise ValueError("fundamental_fields table names must be non-empty strings")
             if any(not field.strip() for field in fields):
                 raise ValueError("fundamental_fields field names must be non-empty strings")
+        return v
+
+    @field_validator("risk_gates")
+    @classmethod
+    def valid_risk_gates(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("risk_gates must be a dictionary")
         return v
 
     @model_validator(mode="after")
