@@ -16,6 +16,12 @@ Purpose: new names outside the existing biotech / quantum / photonics watchlist
 - VRT — AI power and cooling / manufacturing expansion / NVIDIA alignment
 - GEV — AI power, nuclear, and grid infrastructure / technical momentum
 
+## Tracker additions
+- LRCX — semiconductor equipment / AI capex
+- AVGO — AI infrastructure, custom silicon, networking
+- ORCL — enterprise cloud / AI infrastructure
+- GEV is already present in Tier 2; keep it active in the tracker
+
 ## Trigger notes
 - If the system needs the highest-probability first fill, start with CRDO or OKLO.
 - If AI infrastructure is leading, NBIS and VRT are the cleanest continuation names.
