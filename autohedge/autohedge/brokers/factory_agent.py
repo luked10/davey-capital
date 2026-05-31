@@ -1,18 +1,18 @@
 from typing import Any
 
-from autohedge.brokers.base_agent import BrokerBoi
-from autohedge.brokers.paper_agent import PaperBrokerBoi
-from autohedge.brokers.robinhood_agent import RobinhoodBrokerBoi
-from autohedge.brokers.solana_agent import SolanaBrokerBoi
+from autohedge.brokers.base_agent import BrokerAgent
+from autohedge.brokers.paper_agent import PaperBrokerAgent
+from autohedge.brokers.robinhood_agent import RobinhoodBrokerAgent
+from autohedge.brokers.solana_agent import SolanaBrokerAgent
 
-BROKER_AGENT_REGISTRY: dict[str, type[BrokerBoi]] = {
-    'paper': PaperBrokerBoi,
-    'robinhood': RobinhoodBrokerBoi,
-    'solana': SolanaBrokerBoi,
+BROKER_AGENT_REGISTRY: dict[str, type[BrokerAgent]] = {
+    'paper': PaperBrokerAgent,
+    'robinhood': RobinhoodBrokerAgent,
+    'solana': SolanaBrokerAgent,
 }
 
 
-def get_broker_agent(name: str, **kwargs: Any) -> BrokerBoi:
+def get_broker_agent(name: str, **kwargs: Any) -> BrokerAgent:
     key = name.strip().lower()
     try:
         broker_cls = BROKER_AGENT_REGISTRY[key]
