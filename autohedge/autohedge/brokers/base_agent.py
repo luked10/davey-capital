@@ -6,7 +6,7 @@ from typing import Any
 
 
 @dataclass(slots=True)
-class BrokerOrderBoi:
+class BrokerOrderAgent:
     symbol: str
     side: str
     quantity: float
@@ -17,7 +17,7 @@ class BrokerOrderBoi:
 
 
 @dataclass(slots=True)
-class BrokerFillBoi:
+class BrokerFillAgent:
     order_id: str
     symbol: str
     side: str
@@ -29,7 +29,7 @@ class BrokerFillBoi:
 
 
 @dataclass(slots=True)
-class BrokerPositionBoi:
+class BrokerPositionAgent:
     symbol: str
     quantity: float
     average_entry_price: float | None = None
@@ -38,12 +38,12 @@ class BrokerPositionBoi:
 
 
 @dataclass(slots=True)
-class AccountSnapshotBoi:
+class AccountSnapshotAgent:
     broker: str
     cash_balance: float | None = None
     equity_value: float | None = None
     buying_power: float | None = None
-    positions: list[BrokerPositionBoi] = field(default_factory=list)
+    positions: list[BrokerPositionAgent] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -51,7 +51,7 @@ class AccountSnapshotBoi:
         return asdict(self)
 
 
-class BrokerBoi(ABC):
+class BrokerAgent(ABC):
     broker_name = 'unknown'
 
     def __init__(self, *, session_id: str | None = None, config: dict[str, Any] | None = None) -> None:
@@ -59,7 +59,7 @@ class BrokerBoi(ABC):
         self.config = config or {}
 
     @abstractmethod
-    def place_order(self, order: BrokerOrderBoi) -> Any:
+    def place_order(self, order: BrokerOrderAgent) -> Any:
         raise NotImplementedError
 
     @abstractmethod
@@ -67,15 +67,15 @@ class BrokerBoi(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_positions(self) -> list[BrokerPositionBoi]:
+    def get_positions(self) -> list[BrokerPositionAgent]:
         raise NotImplementedError
 
     @abstractmethod
-    def get_fills(self) -> list[BrokerFillBoi]:
+    def get_fills(self) -> list[BrokerFillAgent]:
         raise NotImplementedError
 
     @abstractmethod
-    def get_account_snapshot(self) -> AccountSnapshotBoi:
+    def get_account_snapshot(self) -> AccountSnapshotAgent:
         raise NotImplementedError
 
     def describe(self) -> dict[str, Any]:
