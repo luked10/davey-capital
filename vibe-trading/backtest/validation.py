@@ -314,69 +314,50 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
         return []
 
     row_count = len(exit_rows)
-    symbols = (
-        exit_rows["code"].tolist()
-        if "code" in exit_rows.columns
-        else [""] * row_count
-    )
-    sides = (
-        exit_rows["side"].tolist()
-        if "side" in exit_rows.columns
-        else [""] * row_count
-    )
-    prices = (
-        exit_rows["price"].tolist()
-        if "price" in exit_rows.columns
-        else [0] * row_count
-    )
-    timestamps = (
-        exit_rows["timestamp"].tolist()
-        if "timestamp" in exit_rows.columns
-        else ["2000-01-01"] * row_count
-    )
-    quantities = (
-        exit_rows["qty"].tolist()
-        if "qty" in exit_rows.columns
-        else [0] * row_count
-    )
-    pnls = (
-        exit_rows["pnl"].tolist()
-        if "pnl" in exit_rows.columns
-        else [0] * row_count
-    )
-    pnl_pcts = (
-        exit_rows["return_pct"].tolist()
-        if "return_pct" in exit_rows.columns
-        else [0] * row_count
-    )
-    reasons = (
-        exit_rows["reason"].tolist()
-        if "reason" in exit_rows.columns
-        else ["signal"] * row_count
-    )
-    holding_days = (
-        exit_rows["holding_days"].tolist()
-        if "holding_days" in exit_rows.columns
-        else [0] * row_count
-    )
+
+    def column_or_default(name: str, default: Any) -> List[Any]:
+        """Return the column's values, or a default-filled list if absent."""
+        if name in exit_rows.columns:
+            return exit_rows[name].tolist()
+        return [default] * row_count
+
+    symbols = column_or_default("code", "")
+    sides = column_or_default("side", "")
+    prices = column_or_default("price", 0)
+    quantities = column_or_default("qty", 0)
+    pnls = column_or_default("pnl", 0)
+    pnl_pcts = column_or_default("return_pct", 0)
+    reasons = column_or_default("reason", "signal")
+    holding_days = column_or_default("holding_days", 0)
+
+    # Timestamps: fall back to the sentinel for an absent column, then replace
+    # any per-row NaN/blank with the same sentinel before parsing. Invalid
+    # (non-NaN) timestamp strings still propagate out of pd.Timestamp().
+    if "timestamp" in exit_rows.columns:
+        raw_timestamps = exit_rows["timestamp"]
+        timestamps = raw_timestamps.where(raw_timestamps.notna(), "2000-01-01").tolist()
+    else:
+        timestamps = ["2000-01-01"] * row_count
 
     trades: List[TradeRecord] = []
-    for index in range(row_count):
-        timestamp = timestamps[index]
-        timestamp = "2000-01-01" if pd.isna(timestamp) else timestamp
+    for symbol, side, price, timestamp, qty, pnl, pnl_pct, reason, holding in zip(
+        symbols, sides, prices, timestamps, quantities,
+        pnls, pnl_pcts, reasons, holding_days,
+    ):
+        parsed_time = pd.Timestamp(timestamp)
         trades.append(TradeRecord(
-            symbol=str(symbols[index]),
-            direction=1 if sides[index] == "sell" else -1,
+            symbol=str(symbol),
+            direction=1 if side == "sell" else -1,
             entry_price=0.0,
-            exit_price=float(prices[index]),
-            entry_time=pd.Timestamp(timestamp),
-            exit_time=pd.Timestamp(timestamp),
-            size=float(quantities[index]),
+            exit_price=float(price),
+            entry_time=parsed_time,
+            exit_time=parsed_time,
+            size=float(qty),
             leverage=1.0,
-            pnl=float(pnls[index]),
-            pnl_pct=float(pnl_pcts[index]),
-            exit_reason=str(reasons[index]),
-            holding_bars=int(holding_days[index]),
+            pnl=float(pnl),
+            pnl_pct=float(pnl_pct),
+            exit_reason=str(reason),
+            holding_bars=int(holding),
             commission=0.0,
         ))
     return trades
