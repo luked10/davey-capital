@@ -1,4 +1,4 @@
-# quant-hub-bridge
+# davey-capital
 
 Stateless trading bridge. The repository is the source of truth for workflow checkpoints, decisions, fills, and broker wiring.
 
