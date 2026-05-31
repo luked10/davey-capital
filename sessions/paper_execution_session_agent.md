@@ -10,4 +10,4 @@ Changes to plan: initiated starter CRDO and SLV paper positions rather than wait
 Decision log references: research/high_alpha_rotation_agent.md, research/new_high_alpha_names_agent.md
 Exceptions or rejects: none
 End state: paper session now carries CRDO and SLV starter positions and is ready for the next signal packet
-Notes: PaperBrokerBoi is registered in autohedge/autohedge/brokers/factory_agent.py under broker name 'paper'; CRDO fill logged at 2026-05-13T15:53:04Z; SLV fill logged at 2026-05-13T23:41:00Z; real-money-conviction flag set true for both starter fills
+Notes: PaperBrokerAgent is registered in autohedge/autohedge/brokers/factory_agent.py under broker name 'paper'; CRDO fill logged at 2026-05-13T15:53:04Z; SLV fill logged at 2026-05-13T23:41:00Z; real-money-conviction flag set true for both starter fills
