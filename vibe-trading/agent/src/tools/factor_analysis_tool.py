@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr
 
 from src.agent.tools import BaseTool
 
@@ -31,18 +30,13 @@ def _compute_ic_series(factor_df: pd.DataFrame, return_df: pd.DataFrame) -> pd.S
     factor_df = factor_df.loc[common_dates, common_codes]
     return_df = return_df.loc[common_dates, common_codes]
 
-    ic_values = {}
-    for date in common_dates:
-        f = factor_df.loc[date].dropna()
-        r = return_df.loc[date].dropna()
-        shared = f.index.intersection(r.index)
-        if len(shared) < 5:
-            continue
-        corr, _ = spearmanr(f[shared], r[shared])
-        if not np.isnan(corr):
-            ic_values[date] = corr
-
-    return pd.Series(ic_values, dtype=float)
+    # Spearman IC equals Pearson correlation on ranks.
+    factor_rank = factor_df.rank(axis=1, method="average", na_option="keep")
+    return_rank = return_df.rank(axis=1, method="average", na_option="keep")
+    shared_counts = (factor_df.notna() & return_df.notna()).sum(axis=1)
+    ic_series = factor_rank.corrwith(return_rank, axis=1, method="pearson")
+    ic_series = ic_series[shared_counts >= 5].dropna()
+    return ic_series.astype(float)
 
 
 def _compute_group_equity(
