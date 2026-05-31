@@ -39,8 +39,48 @@
 - Safety review status: **SAFETY OK** (no BLOCKER/HIGH findings).
 - Compatibility review status: **COMPATIBILITY OK** (no BLOCKER/HIGH findings).
 
-## Remaining TODOs / Next-Step Gate
-- Step 3 finalization commit and handoff publication are the only remaining Step 3 wrap-up actions.
-- Keep `dry_run` default behavior and fail-closed execution validation unchanged.
-- **Next step remains blocked until the user explicitly starts it.**
-- **Do not auto-start Step 4.**
+## Overnight Build #3-#5 Scaffold (2026-05-31)
+- Branch: `feature/overnight-build-3-5-scaffold`
+- Scope: local deterministic scaffolding only; no live trading, no live Alpaca calls, no credential requirements.
+
+### Implemented in this sprint
+- **Build-order #3 watcher/poke scaffolding**
+  - Added local bridge contracts: `contracts/overnight_scaffold.py`.
+  - Added deterministic watcher + artifact writer: `autohedge/autohedge/overnight_scaffold.py`.
+  - Added local-only CLI runner: `scripts/run_overnight_watcher_scaffold.py`.
+  - Added smoke for candidate + NEEDS_HUMAN + poke queue writes: `scripts/smoke_watcher_scaffold.py`.
+- **Build-order #4 vectorization pass (safe mechanical only)**
+  - Vectorized IC computation path in `vibe-trading/agent/src/tools/factor_analysis_tool.py`.
+  - Refactored trade extraction hotspot in `vibe-trading/backtest/validation.py` away from `iterrows`.
+  - Added deterministic equivalence smoke: `scripts/smoke_vectorization_step4.py`.
+- **Build-order #5 persistent engine + scheduler scaffold**
+  - Added reusable engine + scheduler wrappers: `autohedge/autohedge/runtime_scaffold.py`.
+  - Updated REPL to reuse one engine per session: `autohedge/autohedge/cli.py`.
+  - Added deterministic smoke for lifecycle/reuse/scheduler behavior: `scripts/smoke_engine_scheduler_step5.py`.
+
+### Tests run
+- `python3 scripts/smoke_bridge_contract.py`
+- `python3 scripts/smoke_brokers_step2.py`
+- `python3 scripts/smoke_brokers_step3.py`
+- `python3 scripts/smoke_watcher_scaffold.py`
+- `python3 scripts/smoke_vectorization_step4.py`
+- `python3 scripts/smoke_engine_scheduler_step5.py`
+
+### Safety + compatibility
+- Safety review severity: **NONE** (no live order path widening, no live Alpaca calls, no secret material, dry-run defaults preserved).
+- Compatibility review severity: **NONE**.
+- **OVERNIGHT COMPATIBILITY OK.**
+
+### Remaining TODOs (intentionally deferred / fail-safe)
+- `trade_journal_parsers.py` still contains additional `iterrows` paths; deferred to avoid unverified semantic drift.
+- Poke bridge remains local-file queue only (`poke_bridge_queue.jsonl`); no external delivery integration enabled.
+- Scheduler remains default-disabled; no module auto-start behavior on import.
+
+### No-push + review warning
+- No `git push` performed during overnight sprint.
+- This branch **must receive human review before any merge or push**.
+
+### Suggested next review steps
+- Review overnight scaffolding diffs for naming/placement conventions and long-term ownership.
+- Decide whether to keep the new contracts in `contracts/` or move into a dedicated runtime package.
+- Approve or reject the deferred `trade_journal_parsers.py` vectorization follow-up.
