@@ -8,16 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from autohedge.brokers.base_agent import (
-    AccountSnapshotBoi,
-    BrokerBoi,
-    BrokerFillBoi,
-    BrokerOrderBoi,
-    BrokerPositionBoi,
+    AccountSnapshotAgent,
+    BrokerAgent,
+    BrokerFillAgent,
+    BrokerOrderAgent,
+    BrokerPositionAgent,
 )
 
 
 @dataclass(slots=True)
-class PaperStateBoi:
+class PaperStateAgent:
     broker_name: str = 'paper'
     state_path: str | None = None
     starting_cash: float = 100000.0
@@ -32,16 +32,16 @@ class PaperStateBoi:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class PaperStateStoreBoi:
+class PaperStateStoreAgent:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def load(self) -> PaperStateBoi:
+    def load(self) -> PaperStateAgent:
         if not self.path.exists():
-            return PaperStateBoi(state_path=str(self.path))
+            return PaperStateAgent(state_path=str(self.path))
 
         payload = json.loads(self.path.read_text())
-        return PaperStateBoi(
+        return PaperStateAgent(
             broker_name=payload.get('broker_name', 'paper'),
             state_path=payload.get('state_path', str(self.path)),
             starting_cash=self._safe_float(payload.get('starting_cash')) or 100000.0,
@@ -62,7 +62,7 @@ class PaperStateStoreBoi:
             metadata=dict(payload.get('metadata', {})),
         )
 
-    def save(self, state: PaperStateBoi) -> None:
+    def save(self, state: PaperStateAgent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = asdict(state)
         payload['state_path'] = str(self.path)
@@ -85,7 +85,7 @@ class PaperStateStoreBoi:
             return None
 
 
-class PaperBrokerBoi(BrokerBoi):
+class PaperBrokerAgent(BrokerAgent):
     broker_name = 'paper'
 
     def __init__(
@@ -99,7 +99,7 @@ class PaperBrokerBoi(BrokerBoi):
         self.state_path = Path(
             self._read_setting('PAPER_STATE_PATH', default='.autohedge/paper_state_agent.json')
         )
-        self.state_store = PaperStateStoreBoi(self.state_path)
+        self.state_store = PaperStateStoreAgent(self.state_path)
         self.state = self.state_store.load()
         self.starting_cash = self._read_float('PAPER_STARTING_CASH', default=str(self.state.starting_cash))
         self.fee_rate = self._read_float('PAPER_FEE_RATE', default='0.0')
@@ -200,7 +200,7 @@ class PaperBrokerBoi(BrokerBoi):
         self.state.next_fill_id += 1
         return fill_id
 
-    def _market_price(self, order: BrokerOrderBoi) -> float:
+    def _market_price(self, order: BrokerOrderAgent) -> float:
         symbol = order.symbol.strip()
         if symbol in self.state.last_prices:
             return float(self.state.last_prices[symbol])
@@ -276,7 +276,7 @@ class PaperBrokerBoi(BrokerBoi):
         new_quantity = current_quantity + quantity_delta
 
         if new_quantity < 0 and not self.allow_short:
-            raise ValueError('PaperBrokerBoi does not allow short positions by default.')
+            raise ValueError('PaperBrokerAgent does not allow short positions by default.')
 
         if quantity_delta > 0:
             total_cost_basis = (current_quantity * current_avg_price) + (quantity_delta * fill_price)
@@ -301,7 +301,7 @@ class PaperBrokerBoi(BrokerBoi):
 
     def _record_fill(
         self,
-        order: BrokerOrderBoi,
+        order: BrokerOrderAgent,
         *,
         order_id: str,
         fill_price: float,
@@ -321,7 +321,7 @@ class PaperBrokerBoi(BrokerBoi):
 
         projected_cash = self.state.cash_balance + cash_delta
         if projected_cash < 0 and not self.allow_margin:
-            raise ValueError('PaperBrokerBoi does not allow negative cash by default.')
+            raise ValueError('PaperBrokerAgent does not allow negative cash by default.')
 
         self.state.cash_balance = projected_cash
         self._upsert_position(
@@ -350,13 +350,13 @@ class PaperBrokerBoi(BrokerBoi):
         self._touch_state()
         return fill_record
 
-    def _limit_is_executable(self, order: BrokerOrderBoi, market_price: float) -> bool:
+    def _limit_is_executable(self, order: BrokerOrderAgent, market_price: float) -> bool:
         side = order.side.strip().lower()
         if side == 'buy':
             return order.limit_price is not None and order.limit_price >= market_price
         return order.limit_price is not None and order.limit_price <= market_price
 
-    def place_order(self, order: BrokerOrderBoi) -> Any:
+    def place_order(self, order: BrokerOrderAgent) -> Any:
         side = order.side.strip().lower()
         order_type = order.order_type.strip().lower()
         asset_class = order.asset_class.strip().lower() or 'stock'
@@ -420,11 +420,11 @@ class PaperBrokerBoi(BrokerBoi):
         self._touch_state()
         return canceled_order or {'order_id': order_id, 'status': 'not_found'}
 
-    def get_positions(self) -> list[BrokerPositionBoi]:
-        positions: list[BrokerPositionBoi] = []
+    def get_positions(self) -> list[BrokerPositionAgent]:
+        positions: list[BrokerPositionAgent] = []
         for payload in self.state.positions:
             positions.append(
-                BrokerPositionBoi(
+                BrokerPositionAgent(
                     symbol=str(payload.get('symbol', '')),
                     quantity=float(payload.get('quantity', 0.0)),
                     average_entry_price=self._safe_float(payload.get('average_entry_price')),
@@ -435,11 +435,11 @@ class PaperBrokerBoi(BrokerBoi):
             )
         return positions
 
-    def get_fills(self) -> list[BrokerFillBoi]:
-        fills: list[BrokerFillBoi] = []
+    def get_fills(self) -> list[BrokerFillAgent]:
+        fills: list[BrokerFillAgent] = []
         for payload in self.state.fills:
             fills.append(
-                BrokerFillBoi(
+                BrokerFillAgent(
                     order_id=str(payload.get('order_id', '')),
                     symbol=str(payload.get('symbol', '')),
                     side=str(payload.get('side', '')),
@@ -453,7 +453,7 @@ class PaperBrokerBoi(BrokerBoi):
             )
         return fills
 
-    def get_account_snapshot(self) -> AccountSnapshotBoi:
+    def get_account_snapshot(self) -> AccountSnapshotAgent:
         positions = self.get_positions()
         equity_value = self.state.cash_balance
         for position in positions:
@@ -465,7 +465,7 @@ class PaperBrokerBoi(BrokerBoi):
             equity_value += float(position.quantity) * float(mark_price)
 
         buying_power = self.state.cash_balance if not self.allow_margin else max(self.state.cash_balance * 2.0, self.state.cash_balance)
-        return AccountSnapshotBoi(
+        return AccountSnapshotAgent(
             broker=self.broker_name,
             cash_balance=self.state.cash_balance,
             equity_value=equity_value,
@@ -491,3 +491,9 @@ class PaperBrokerBoi(BrokerBoi):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+# Backwards-compatible aliases.
+PaperStateBoi = PaperStateAgent
+PaperStateStoreBoi = PaperStateStoreAgent
+PaperBrokerBoi = PaperBrokerAgent

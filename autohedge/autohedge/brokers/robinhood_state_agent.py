@@ -7,7 +7,7 @@ from typing import Any
 
 
 @dataclass(slots=True)
-class RobinhoodStateBoi:
+class RobinhoodStateAgent:
     username: str | None = None
     session_pickle_path: str | None = None
     state_path: str | None = None
@@ -18,15 +18,15 @@ class RobinhoodStateBoi:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class RobinhoodStateStoreBoi:
+class RobinhoodStateStoreAgent:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def load(self) -> RobinhoodStateBoi:
+    def load(self) -> RobinhoodStateAgent:
         if not self.path.exists():
-            return RobinhoodStateBoi(state_path=str(self.path))
+            return RobinhoodStateAgent(state_path=str(self.path))
         payload = json.loads(self.path.read_text())
-        return RobinhoodStateBoi(
+        return RobinhoodStateAgent(
             username=payload.get('username'),
             session_pickle_path=payload.get('session_pickle_path'),
             state_path=payload.get('state_path', str(self.path)),
@@ -37,8 +37,13 @@ class RobinhoodStateStoreBoi:
             metadata=payload.get('metadata', {}),
         )
 
-    def save(self, state: RobinhoodStateBoi) -> None:
+    def save(self, state: RobinhoodStateAgent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = asdict(state)
         payload['state_path'] = str(self.path)
         self.path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+# Backwards-compatible aliases.
+RobinhoodStateBoi = RobinhoodStateAgent
+RobinhoodStateStoreBoi = RobinhoodStateStoreAgent

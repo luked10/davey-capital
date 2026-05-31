@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from autohedge.brokers.base_agent import (
-    AccountSnapshotBoi,
-    BrokerBoi,
-    BrokerFillBoi,
-    BrokerOrderBoi,
-    BrokerPositionBoi,
+    AccountSnapshotAgent,
+    BrokerAgent,
+    BrokerFillAgent,
+    BrokerOrderAgent,
+    BrokerPositionAgent,
 )
 from autohedge.brokers.robinhood_state_agent import (
-    RobinhoodStateBoi,
-    RobinhoodStateStoreBoi,
+    RobinhoodStateAgent,
+    RobinhoodStateStoreAgent,
 )
 
 
@@ -44,7 +44,7 @@ def _load_dotenv_if_available() -> None:
             continue
 
 
-class RobinhoodBrokerBoi(BrokerBoi):
+class RobinhoodBrokerAgent(BrokerAgent):
     broker_name = 'robinhood'
 
     def __init__(
@@ -78,7 +78,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
                 default='.autohedge/robinhood_state_agent.json',
             )
         )
-        self.state_store = RobinhoodStateStoreBoi(self.state_path)
+        self.state_store = RobinhoodStateStoreAgent(self.state_path)
         self.state = self.state_store.load()
         self.rh = self._import_robinhood_client()
         self.auth_payload: dict[str, Any] = {}
@@ -151,7 +151,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
             except Exception:
                 self.auth_payload = {'value': auth_payload}
 
-        self.state = RobinhoodStateBoi(
+        self.state = RobinhoodStateAgent(
             username=self.username,
             session_pickle_path=str(self.session_pickle_path),
             state_path=str(self.state_path),
@@ -201,7 +201,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
             return profile.get('account_number') or profile.get('id')
         return None
 
-    def place_order(self, order: BrokerOrderBoi) -> Any:
+    def place_order(self, order: BrokerOrderAgent) -> Any:
         asset_class = (order.asset_class or 'stock').strip().lower()
         side = order.side.strip().lower()
         order_type = order.order_type.strip().lower()
@@ -212,7 +212,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
 
     def _place_stock_order(
         self,
-        order: BrokerOrderBoi,
+        order: BrokerOrderAgent,
         side: str,
         order_type: str,
     ) -> Any:
@@ -243,7 +243,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
 
     def _place_crypto_order(
         self,
-        order: BrokerOrderBoi,
+        order: BrokerOrderAgent,
         side: str,
         order_type: str,
     ) -> Any:
@@ -279,8 +279,8 @@ class RobinhoodBrokerBoi(BrokerBoi):
             ['cancel_stock_order', 'orders.cancel_stock_order'], order_id
         )
 
-    def get_positions(self) -> list[BrokerPositionBoi]:
-        positions: list[BrokerPositionBoi] = []
+    def get_positions(self) -> list[BrokerPositionAgent]:
+        positions: list[BrokerPositionAgent] = []
 
         holdings = self._call_first_optional(
             ['build_holdings', 'account.build_holdings']
@@ -295,7 +295,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
                 avg = payload.get('average_buy_price')
                 market = payload.get('equity')
                 positions.append(
-                    BrokerPositionBoi(
+                    BrokerPositionAgent(
                         symbol=symbol,
                         quantity=quantity,
                         average_entry_price=float(avg) if avg else None,
@@ -323,7 +323,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
                 )
                 avg = payload.get('average_buy_price')
                 positions.append(
-                    BrokerPositionBoi(
+                    BrokerPositionAgent(
                         symbol=symbol,
                         quantity=quantity,
                         average_entry_price=float(avg) if avg else None,
@@ -334,8 +334,8 @@ class RobinhoodBrokerBoi(BrokerBoi):
 
         return positions
 
-    def get_fills(self) -> list[BrokerFillBoi]:
-        fills: list[BrokerFillBoi] = []
+    def get_fills(self) -> list[BrokerFillAgent]:
+        fills: list[BrokerFillAgent] = []
         stock_orders = self._call_first_optional(
             ['get_all_stock_orders', 'orders.get_all_stock_orders']
         )
@@ -356,8 +356,8 @@ class RobinhoodBrokerBoi(BrokerBoi):
         self,
         payload: dict[str, Any],
         asset_class: str,
-    ) -> BrokerFillBoi:
-        return BrokerFillBoi(
+    ) -> BrokerFillAgent:
+        return BrokerFillAgent(
             order_id=str(payload.get('id') or payload.get('url') or ''),
             symbol=str(
                 payload.get('symbol') or payload.get('currency_code') or ''
@@ -379,7 +379,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
             metadata=dict(payload),
         )
 
-    def get_account_snapshot(self) -> AccountSnapshotBoi:
+    def get_account_snapshot(self) -> AccountSnapshotAgent:
         cash_balance = None
         equity_value = None
         buying_power = None
@@ -415,7 +415,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
                     or portfolio_profile.get('extended_hours_equity')
                 )
 
-        return AccountSnapshotBoi(
+        return AccountSnapshotAgent(
             broker=self.broker_name,
             cash_balance=cash_balance,
             equity_value=equity_value,
@@ -437,3 +437,7 @@ class RobinhoodBrokerBoi(BrokerBoi):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+# Backwards-compatible alias.
+RobinhoodBrokerBoi = RobinhoodBrokerAgent

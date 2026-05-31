@@ -5,6 +5,11 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 
+def _normalize_asset_class(value: Any) -> str:
+    text = str(value or '').strip().lower()
+    return text or 'stock'
+
+
 @dataclass(slots=True)
 class BrokerOrderAgent:
     symbol: str
@@ -13,7 +18,12 @@ class BrokerOrderAgent:
     order_type: str = 'market'
     limit_price: float | None = None
     time_in_force: str = 'day'
+    asset_class: str = 'stock'
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Older call sites may pass None/empty; normalize to a safe default.
+        self.asset_class = _normalize_asset_class(self.asset_class)
 
 
 @dataclass(slots=True)
@@ -25,7 +35,11 @@ class BrokerFillAgent:
     price: float | None = None
     fee: float | None = None
     status: str = 'filled'
+    asset_class: str = 'stock'
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.asset_class = _normalize_asset_class(self.asset_class)
 
 
 @dataclass(slots=True)
@@ -34,7 +48,11 @@ class BrokerPositionAgent:
     quantity: float
     average_entry_price: float | None = None
     mark_price: float | None = None
+    asset_class: str = 'stock'
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.asset_class = _normalize_asset_class(self.asset_class)
 
 
 @dataclass(slots=True)
@@ -84,3 +102,11 @@ class BrokerAgent(ABC):
             'session_id': self.session_id,
             'config_keys': sorted(self.config.keys()),
         }
+
+
+# Backwards-compatible aliases for older broker adapters.
+BrokerOrderBoi = BrokerOrderAgent
+BrokerFillBoi = BrokerFillAgent
+BrokerPositionBoi = BrokerPositionAgent
+AccountSnapshotBoi = AccountSnapshotAgent
+BrokerBoi = BrokerAgent

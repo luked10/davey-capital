@@ -1,11 +1,13 @@
 from typing import Any
 
 from autohedge.brokers.base_agent import BrokerAgent
+from autohedge.brokers.alpaca_agent import AlpacaBrokerAgent
 from autohedge.brokers.paper_agent import PaperBrokerAgent
 from autohedge.brokers.robinhood_agent import RobinhoodBrokerAgent
 from autohedge.brokers.solana_agent import SolanaBrokerAgent
 
 BROKER_AGENT_REGISTRY: dict[str, type[BrokerAgent]] = {
+    'alpaca': AlpacaBrokerAgent,
     'paper': PaperBrokerAgent,
     'robinhood': RobinhoodBrokerAgent,
     'solana': SolanaBrokerAgent,
