@@ -152,30 +152,70 @@ def _to_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _column_or_default(
+    df: pd.DataFrame,
+    column: str | None,
+    *,
+    default: Any,
+    row_count: int,
+) -> list[Any]:
+    """Return column values or a row-aligned default list."""
+    if column and column in df.columns:
+        return df[column].tolist()
+    return [default] * row_count
+
+
 def parse_tonghuashun(df: pd.DataFrame) -> list[TradeRecord]:
     """Parse 同花顺 exports.
 
     Expected columns: 成交时间, 证券代码, 证券名称, 操作, 成交数量, 成交价格,
     成交金额, 手续费, 印花税, 过户费.
     """
-    records: list[TradeRecord] = []
-    for _, row in df.iterrows():
-        qty = _to_float(row.get("成交数量"))
-        price = _to_float(row.get("成交价格"))
-        amount = _to_float(row.get("成交金额")) or qty * price
-        fee = _to_float(row.get("手续费")) + _to_float(row.get("印花税")) + _to_float(row.get("过户费"))
-        records.append(TradeRecord(
-            datetime=str(row.get("成交时间", "")).strip(),
-            symbol=_qualify_a_share(row.get("证券代码", "")),
-            name=str(row.get("证券名称", "")).strip(),
-            side=_normalize_side(row.get("操作")),
+    row_count = len(df)
+    datetimes = [str(value).strip() for value in _column_or_default(df, "成交时间", default="", row_count=row_count)]
+    symbols = [_qualify_a_share(value) for value in _column_or_default(df, "证券代码", default="", row_count=row_count)]
+    names = [str(value).strip() for value in _column_or_default(df, "证券名称", default="", row_count=row_count)]
+    sides = [_normalize_side(value) for value in _column_or_default(df, "操作", default=None, row_count=row_count)]
+
+    qty_values = [_to_float(value) for value in _column_or_default(df, "成交数量", default=None, row_count=row_count)]
+    price_values = [_to_float(value) for value in _column_or_default(df, "成交价格", default=None, row_count=row_count)]
+    amount_raw_values = [_to_float(value) for value in _column_or_default(df, "成交金额", default=None, row_count=row_count)]
+    fee_values = [
+        _to_float(shouxu) + _to_float(yinhua) + _to_float(guohu)
+        for shouxu, yinhua, guohu in zip(
+            _column_or_default(df, "手续费", default=None, row_count=row_count),
+            _column_or_default(df, "印花税", default=None, row_count=row_count),
+            _column_or_default(df, "过户费", default=None, row_count=row_count),
+        )
+    ]
+    amount_values = [
+        amount_raw or (qty * price)
+        for amount_raw, qty, price in zip(amount_raw_values, qty_values, price_values)
+    ]
+
+    return [
+        TradeRecord(
+            datetime=dt,
+            symbol=symbol,
+            name=name,
+            side=side,
             quantity=qty,
             price=price,
             amount=amount,
             fee=fee,
             market="china_a",
-        ))
-    return records
+        )
+        for dt, symbol, name, side, qty, price, amount, fee in zip(
+            datetimes,
+            symbols,
+            names,
+            sides,
+            qty_values,
+            price_values,
+            amount_values,
+            fee_values,
+        )
+    ]
 
 
 def parse_eastmoney(df: pd.DataFrame) -> list[TradeRecord]:
@@ -184,31 +224,57 @@ def parse_eastmoney(df: pd.DataFrame) -> list[TradeRecord]:
     Expected columns: 成交日期 (YYYYMMDD), 成交时间 (HH:MM:SS), 股票代码,
     股票名称, 买卖标志 (B/S), 成交数量, 成交均价, 成交金额, 佣金, 印花税.
     """
-    records: list[TradeRecord] = []
-    for _, row in df.iterrows():
-        raw_date = str(row.get("成交日期", "")).strip()
-        raw_time = str(row.get("成交时间", "")).strip()
-        if len(raw_date) == 8 and raw_date.isdigit():
-            iso_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-        else:
-            iso_date = raw_date
-        dt = f"{iso_date} {raw_time}".strip()
-        qty = _to_float(row.get("成交数量"))
-        price = _to_float(row.get("成交均价"))
-        amount = _to_float(row.get("成交金额")) or qty * price
-        fee = _to_float(row.get("佣金")) + _to_float(row.get("印花税"))
-        records.append(TradeRecord(
+    row_count = len(df)
+    raw_dates = [str(value).strip() for value in _column_or_default(df, "成交日期", default="", row_count=row_count)]
+    raw_times = [str(value).strip() for value in _column_or_default(df, "成交时间", default="", row_count=row_count)]
+    iso_dates = [
+        f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        if len(raw_date) == 8 and raw_date.isdigit()
+        else raw_date
+        for raw_date in raw_dates
+    ]
+    datetimes = [f"{iso_date} {raw_time}".strip() for iso_date, raw_time in zip(iso_dates, raw_times)]
+    symbols = [_qualify_a_share(value) for value in _column_or_default(df, "股票代码", default="", row_count=row_count)]
+    names = [str(value).strip() for value in _column_or_default(df, "股票名称", default="", row_count=row_count)]
+    sides = [_normalize_side(value) for value in _column_or_default(df, "买卖标志", default=None, row_count=row_count)]
+    qty_values = [_to_float(value) for value in _column_or_default(df, "成交数量", default=None, row_count=row_count)]
+    price_values = [_to_float(value) for value in _column_or_default(df, "成交均价", default=None, row_count=row_count)]
+    amount_raw_values = [_to_float(value) for value in _column_or_default(df, "成交金额", default=None, row_count=row_count)]
+    fee_values = [
+        _to_float(yongjin) + _to_float(yinhua)
+        for yongjin, yinhua in zip(
+            _column_or_default(df, "佣金", default=None, row_count=row_count),
+            _column_or_default(df, "印花税", default=None, row_count=row_count),
+        )
+    ]
+    amount_values = [
+        amount_raw or (qty * price)
+        for amount_raw, qty, price in zip(amount_raw_values, qty_values, price_values)
+    ]
+
+    return [
+        TradeRecord(
             datetime=dt,
-            symbol=_qualify_a_share(row.get("股票代码", "")),
-            name=str(row.get("股票名称", "")).strip(),
-            side=_normalize_side(row.get("买卖标志")),
+            symbol=symbol,
+            name=name,
+            side=side,
             quantity=qty,
             price=price,
             amount=amount,
             fee=fee,
             market="china_a",
-        ))
-    return records
+        )
+        for dt, symbol, name, side, qty, price, amount, fee in zip(
+            datetimes,
+            symbols,
+            names,
+            sides,
+            qty_values,
+            price_values,
+            amount_values,
+            fee_values,
+        )
+    ]
 
 
 def _futu_market(symbol: str, market_hint: str) -> str:
@@ -229,28 +295,65 @@ def parse_futu(df: pd.DataFrame) -> list[TradeRecord]:
     Expected columns: Date, Time, Symbol, Name, Side, Quantity, Price,
     Amount, Commission, Platform Fee, Market (optional).
     """
-    records: list[TradeRecord] = []
-    for _, row in df.iterrows():
-        date = str(row.get("Date", "")).strip()
-        time = str(row.get("Time", "")).strip()
-        dt = f"{date} {time}".strip()
-        symbol = str(row.get("Symbol", "")).strip().upper()
-        qty = _to_float(row.get("Quantity"))
-        price = _to_float(row.get("Price"))
-        amount = _to_float(row.get("Amount")) or qty * price
-        fee = _to_float(row.get("Commission")) + _to_float(row.get("Platform Fee"))
-        records.append(TradeRecord(
+    row_count = len(df)
+    dates = [str(value).strip() for value in _column_or_default(df, "Date", default="", row_count=row_count)]
+    times = [str(value).strip() for value in _column_or_default(df, "Time", default="", row_count=row_count)]
+    datetimes = [f"{date} {time}".strip() for date, time in zip(dates, times)]
+
+    symbols = [
+        str(value).strip().upper()
+        for value in _column_or_default(df, "Symbol", default="", row_count=row_count)
+    ]
+    names = [str(value).strip() for value in _column_or_default(df, "Name", default="", row_count=row_count)]
+    side_source_col = "Side" if "Side" in df.columns else "Direction"
+    sides = [
+        _normalize_side(value)
+        for value in _column_or_default(df, side_source_col, default=None, row_count=row_count)
+    ]
+    qty_values = [_to_float(value) for value in _column_or_default(df, "Quantity", default=None, row_count=row_count)]
+    price_values = [_to_float(value) for value in _column_or_default(df, "Price", default=None, row_count=row_count)]
+    amount_raw_values = [_to_float(value) for value in _column_or_default(df, "Amount", default=None, row_count=row_count)]
+    fee_values = [
+        _to_float(commission) + _to_float(platform_fee)
+        for commission, platform_fee in zip(
+            _column_or_default(df, "Commission", default=None, row_count=row_count),
+            _column_or_default(df, "Platform Fee", default=None, row_count=row_count),
+        )
+    ]
+    amount_values = [
+        amount_raw or (qty * price)
+        for amount_raw, qty, price in zip(amount_raw_values, qty_values, price_values)
+    ]
+    market_hints = [
+        str(value)
+        for value in _column_or_default(df, "Market", default="", row_count=row_count)
+    ]
+    markets = [_futu_market(symbol, market_hint) for symbol, market_hint in zip(symbols, market_hints)]
+
+    return [
+        TradeRecord(
             datetime=dt,
             symbol=symbol,
-            name=str(row.get("Name", "")).strip(),
-            side=_normalize_side(row.get("Side") if "Side" in df.columns else row.get("Direction")),
+            name=name,
+            side=side,
             quantity=qty,
             price=price,
             amount=amount,
             fee=fee,
-            market=_futu_market(symbol, str(row.get("Market", ""))),
-        ))
-    return records
+            market=market,
+        )
+        for dt, symbol, name, side, qty, price, amount, fee, market in zip(
+            datetimes,
+            symbols,
+            names,
+            sides,
+            qty_values,
+            price_values,
+            amount_values,
+            fee_values,
+            markets,
+        )
+    ]
 
 
 def parse_generic(df: pd.DataFrame) -> list[TradeRecord]:
@@ -281,32 +384,71 @@ def parse_generic(df: pd.DataFrame) -> list[TradeRecord]:
     amount_col = pick("amount", "value", "notional")
     fee_col = pick("fee", "commission", "fees")
 
-    records: list[TradeRecord] = []
-    for _, row in df.iterrows():
-        if dt_col:
-            dt = str(row.get(dt_col, "")).strip()
-        elif date_col:
-            dt = str(row.get(date_col, "")).strip()
-        else:
-            dt = ""
-        symbol = str(row.get(sym_col, "")).strip() if sym_col else ""
-        qty = _to_float(row.get(qty_col)) if qty_col else 0.0
-        price = _to_float(row.get(price_col)) if price_col else 0.0
-        amount = _to_float(row.get(amount_col)) if amount_col else qty * price
-        fee = _to_float(row.get(fee_col)) if fee_col else 0.0
-        market = _infer_market_from_symbol(symbol)
-        records.append(TradeRecord(
+    row_count = len(df)
+    if dt_col:
+        datetimes = [
+            str(value).strip()
+            for value in _column_or_default(df, dt_col, default="", row_count=row_count)
+        ]
+    elif date_col:
+        datetimes = [
+            str(value).strip()
+            for value in _column_or_default(df, date_col, default="", row_count=row_count)
+        ]
+    else:
+        datetimes = [""] * row_count
+
+    symbols = [
+        str(value).strip()
+        for value in _column_or_default(df, sym_col, default="", row_count=row_count)
+    ]
+    names = [
+        str(value).strip()
+        for value in _column_or_default(df, name_col, default="", row_count=row_count)
+    ]
+    sides = [
+        _normalize_side(value)
+        for value in _column_or_default(df, side_col, default="buy", row_count=row_count)
+    ]
+    qty_values = [_to_float(value) for value in _column_or_default(df, qty_col, default=0.0, row_count=row_count)]
+    price_values = [_to_float(value) for value in _column_or_default(df, price_col, default=0.0, row_count=row_count)]
+    if amount_col:
+        amount_raw_values = [
+            _to_float(value) for value in _column_or_default(df, amount_col, default=None, row_count=row_count)
+        ]
+    else:
+        amount_raw_values = [qty * price for qty, price in zip(qty_values, price_values)]
+    fee_values = [_to_float(value) for value in _column_or_default(df, fee_col, default=0.0, row_count=row_count)]
+    markets = [_infer_market_from_symbol(symbol) for symbol in symbols]
+    amount_values = [
+        amount_raw or (qty * price)
+        for amount_raw, qty, price in zip(amount_raw_values, qty_values, price_values)
+    ]
+
+    return [
+        TradeRecord(
             datetime=dt,
             symbol=symbol.upper(),
-            name=str(row.get(name_col, "")).strip() if name_col else "",
-            side=_normalize_side(row.get(side_col) if side_col else "buy"),
+            name=name,
+            side=side,
             quantity=qty,
             price=price,
-            amount=amount or qty * price,
+            amount=amount,
             fee=fee,
             market=market,
-        ))
-    return records
+        )
+        for dt, symbol, name, side, qty, price, amount, fee, market in zip(
+            datetimes,
+            symbols,
+            names,
+            sides,
+            qty_values,
+            price_values,
+            amount_values,
+            fee_values,
+            markets,
+        )
+    ]
 
 
 def _infer_market_from_symbol(symbol: str) -> str:
