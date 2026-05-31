@@ -30,10 +30,19 @@ def _compute_ic_series(factor_df: pd.DataFrame, return_df: pd.DataFrame) -> pd.S
     factor_df = factor_df.loc[common_dates, common_codes]
     return_df = return_df.loc[common_dates, common_codes]
 
-    # Spearman IC equals Pearson correlation on ranks.
-    factor_rank = factor_df.rank(axis=1, method="average", na_option="keep")
-    return_rank = return_df.rank(axis=1, method="average", na_option="keep")
-    shared_counts = (factor_df.notna() & return_df.notna()).sum(axis=1)
+    # Legacy strict semantics under asymmetric missingness: build the shared
+    # non-null mask FIRST (factor present AND return present), apply it to BOTH
+    # frames, and only THEN rank/correlate on the shared subset. Ranking the
+    # full frames independently lets values whose counterpart is NaN influence
+    # the per-date ranks, which diverges from the legacy Spearman IC.
+    shared_mask = factor_df.notna() & return_df.notna()
+    masked_factor = factor_df.where(shared_mask)
+    masked_return = return_df.where(shared_mask)
+
+    # Spearman IC equals Pearson correlation on ranks of the shared subset.
+    factor_rank = masked_factor.rank(axis=1, method="average", na_option="keep")
+    return_rank = masked_return.rank(axis=1, method="average", na_option="keep")
+    shared_counts = shared_mask.sum(axis=1)
     ic_series = factor_rank.corrwith(return_rank, axis=1, method="pearson")
     ic_series = ic_series[shared_counts >= 5].dropna()
     return ic_series.astype(float)

@@ -329,10 +329,13 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
         if "price" in exit_rows.columns
         else [0] * row_count
     )
+    # Legacy dirty-timestamp semantics: when the timestamp COLUMN is present,
+    # NaN / invalid values coerce to NaT (NOT a synthetic "2000-01-01"). The
+    # "2000-01-01" sentinel is only the missing-COLUMN default.
     timestamps = (
-        exit_rows["timestamp"].tolist()
+        pd.to_datetime(exit_rows["timestamp"], errors="coerce").tolist()
         if "timestamp" in exit_rows.columns
-        else ["2000-01-01"] * row_count
+        else [pd.Timestamp("2000-01-01")] * row_count
     )
     quantities = (
         exit_rows["qty"].tolist()
@@ -362,8 +365,9 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
 
     trades: List[TradeRecord] = []
     for index in range(row_count):
+        # Dirty/invalid timestamps stay NaT (legacy semantics); do not invent a
+        # default date for them.
         timestamp = timestamps[index]
-        timestamp = "2000-01-01" if pd.isna(timestamp) else timestamp
         trades.append(TradeRecord(
             symbol=str(symbols[index]),
             direction=1 if sides[index] == "sell" else -1,

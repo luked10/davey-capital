@@ -57,6 +57,30 @@ def main() -> None:
     assert factory_calls["count"] == 1
     engine.close()
 
+    # The CLI/REPL default runtime is fresh-per-task; persistent reuse is opt-in.
+    # Keep these symbols exercised here so they are not orphaned (full lifecycle
+    # parity lives in smoke_repl_lifecycle.py).
+    build_repl_runner = runtime.build_repl_runner
+    ephemeral_cls = runtime.EphemeralAutoHedgeRunner
+
+    default_calls = {"count": 0}
+
+    def default_factory():
+        default_calls["count"] += 1
+        return FakeAutoHedge()
+
+    default_runner = build_repl_runner(engine_factory=default_factory)
+    assert isinstance(default_runner, ephemeral_cls)
+    default_runner.run_task("task-a")
+    default_runner.run_task("task-b")
+    assert default_calls["count"] == 2  # a fresh engine per task
+    assert default_runner.create_count == 2
+    assert default_runner.run_count == 2
+
+    persistent_runner = build_repl_runner(persist=True, engine_factory=fake_factory)
+    assert isinstance(persistent_runner, engine_cls)
+    persistent_runner.close()
+
     invocations: list[str] = []
 
     def fake_job():

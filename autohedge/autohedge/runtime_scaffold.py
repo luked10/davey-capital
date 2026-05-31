@@ -11,8 +11,63 @@ EngineFactory = Callable[[], Any]
 JobCallable = Callable[[], Any]
 
 
+def default_engine_factory() -> Any:
+    """Construct a brand-new AutoHedge instance (shared default factory)."""
+    from autohedge.main import AutoHedge
+
+    return AutoHedge()
+
+
+def _close_engine(engine: Any | None) -> None:
+    """Best-effort close of an engine that may expose a close() method."""
+    if engine is None:
+        return
+    close_fn = getattr(engine, "close", None)
+    if callable(close_fn):
+        close_fn()
+
+
+class EphemeralAutoHedgeRunner:
+    """Create a FRESH AutoHedge instance for every task (no cross-task state).
+
+    This is the DEFAULT runtime for the CLI/REPL: each task gets its own engine
+    so there is no conversation/state bleed between tasks. The engine is closed
+    immediately after each task completes.
+    """
+
+    def __init__(self, engine_factory: EngineFactory | None = None) -> None:
+        self._engine_factory = engine_factory or default_engine_factory
+        self._create_count = 0
+        self._run_count = 0
+
+    def run_task(self, task: str, *args: Any, **kwargs: Any) -> Any:
+        engine = self._engine_factory()
+        self._create_count += 1
+        self._run_count += 1
+        try:
+            return engine.run(task=task, *args, **kwargs)
+        finally:
+            _close_engine(engine)
+
+    def close(self) -> None:
+        # Nothing persistent is held between tasks.
+        return None
+
+    @property
+    def create_count(self) -> int:
+        return self._create_count
+
+    @property
+    def run_count(self) -> int:
+        return self._run_count
+
+
 class PersistentAutoHedgeEngine:
-    """Reuse a single AutoHedge instance across repeated tasks."""
+    """Reuse a single AutoHedge instance across repeated tasks.
+
+    Opt-in only (e.g. CLI `--persist`). NOT the default, because reusing one
+    engine across tasks can leak conversation/state between unrelated tasks.
+    """
 
     def __init__(self, engine_factory: EngineFactory | None = None) -> None:
         self._engine_factory = engine_factory or self._default_engine_factory
@@ -23,9 +78,7 @@ class PersistentAutoHedgeEngine:
 
     @staticmethod
     def _default_engine_factory() -> Any:
-        from autohedge.main import AutoHedge
-
-        return AutoHedge()
+        return default_engine_factory()
 
     def get_engine(self) -> Any:
         with self._lock:
@@ -43,11 +96,7 @@ class PersistentAutoHedgeEngine:
         with self._lock:
             engine = self._engine
             self._engine = None
-        if engine is None:
-            return
-        close_fn = getattr(engine, "close", None)
-        if callable(close_fn):
-            close_fn()
+        _close_engine(engine)
 
     @property
     def create_count(self) -> int:
@@ -56,6 +105,21 @@ class PersistentAutoHedgeEngine:
     @property
     def run_count(self) -> int:
         return self._run_count
+
+
+def build_repl_runner(
+    *,
+    persist: bool = False,
+    engine_factory: EngineFactory | None = None,
+) -> EphemeralAutoHedgeRunner | PersistentAutoHedgeEngine:
+    """Build the runtime backing the REPL.
+
+    Defaults to a fresh-per-task ephemeral runner with no cross-task state.
+    Persistent engine reuse is opt-in via ``persist=True``.
+    """
+    if persist:
+        return PersistentAutoHedgeEngine(engine_factory=engine_factory)
+    return EphemeralAutoHedgeRunner(engine_factory=engine_factory)
 
 
 @dataclass(slots=True)
