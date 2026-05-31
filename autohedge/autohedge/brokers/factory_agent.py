@@ -14,8 +14,17 @@ BROKER_AGENT_REGISTRY: dict[str, type[BrokerAgent]] = {
 }
 
 
-def get_broker_agent(name: str, **kwargs: Any) -> BrokerAgent:
+def _normalize_broker_name(name: Any) -> str:
+    if not isinstance(name, str):
+        raise ValueError("Broker name must be a non-empty string.")
     key = name.strip().lower()
+    if not key:
+        raise ValueError("Broker name must be a non-empty string.")
+    return key
+
+
+def get_broker_agent(name: str, **kwargs: Any) -> BrokerAgent:
+    key = _normalize_broker_name(name)
     try:
         broker_cls = BROKER_AGENT_REGISTRY[key]
     except KeyError as exc:

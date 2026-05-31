@@ -132,6 +132,43 @@ def main() -> None:
     assert blocked.needs_human is True
     assert blocked.status == "needs_human"
 
+    # asset_class normalization edge cases remain deterministic.
+    asset_class_cases = [
+        (None, "stock"),
+        ("", "stock"),
+        ("crypto", "crypto"),
+        ("CRYPTO", "crypto"),
+        ("CrYpTo", "crypto"),
+    ]
+    for index, (asset_class, expected) in enumerate(asset_class_cases):
+        case_intent = ExecutionIntent(
+            intent_id=f"intent-asset-class-{index}",
+            signal_id=signal.signal_id,
+            broker="alpaca",
+            symbol="AAPL",
+            side="buy",
+            quantity=1.0,
+            created_at="2026-05-31T03:45:00Z",
+            metadata={"asset_class": asset_class},
+        )
+        order_payload = execution_intent_to_broker_order(case_intent, risk=risk, run=run)
+        assert order_payload["asset_class"] == expected
+
+    # Ambiguous execution metadata types fail closed.
+    unsafe_string_dry_run = execution_intent_from_json(
+        '{"intent_id":"intent-unsafe-4","signal_id":"sig-001","broker":"alpaca","symbol":"AAPL","side":"buy","quantity":10,"created_at":"2026-05-31T03:35:04Z","dry_run":"false","approved":true,"approved_by":"reviewer","approved_at":"2026-05-31T03:35:05Z"}'
+    )
+    blocked = validate_execution_intent(unsafe_string_dry_run, risk=risk, run=run)
+    assert blocked.allowed is False
+    assert any("dry_run must be boolean" in reason for reason in blocked.reasons)
+
+    unsafe_string_approved = execution_intent_from_json(
+        '{"intent_id":"intent-unsafe-5","signal_id":"sig-001","broker":"alpaca","symbol":"AAPL","side":"buy","quantity":10,"created_at":"2026-05-31T03:35:06Z","dry_run":true,"approved":"true","approved_by":"reviewer","approved_at":"2026-05-31T03:35:07Z"}'
+    )
+    blocked = validate_execution_intent(unsafe_string_approved, risk=risk, run=run)
+    assert blocked.allowed is False
+    assert any("approved must be boolean" in reason for reason in blocked.reasons)
+
     print("bridge_contract smoke: ok")
 
 

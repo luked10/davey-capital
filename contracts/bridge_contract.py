@@ -198,6 +198,13 @@ def _positive_float(value: Any) -> float | None:
         return None
 
 
+def _strict_bool(value: Any, *, field_name: str, reasons: list[str]) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    reasons.append(f"{field_name} must be boolean")
+    return None
+
+
 def validate_execution_intent(
     intent: ExecutionIntent,
     risk: RiskSummary | None = None,
@@ -210,6 +217,8 @@ def validate_execution_intent(
     symbol = _clean_text(intent.symbol).upper()
     side = _clean_text(intent.side).lower()
     order_type = _clean_text(intent.order_type).lower() or "market"
+    dry_run = _strict_bool(intent.dry_run, field_name="dry_run", reasons=reasons)
+    approved = _strict_bool(intent.approved, field_name="approved", reasons=reasons)
 
     if not broker:
         reasons.append("missing broker")
@@ -235,15 +244,15 @@ def validate_execution_intent(
         if limit_price is None or limit_price <= 0:
             reasons.append("limit_price must be positive for limit order")
 
-    if not intent.dry_run:
-        if not intent.approved:
+    if dry_run is False:
+        if approved is not True:
             reasons.append("dry_run=False requires approved=True")
         if not _clean_text(intent.approved_by):
             reasons.append("dry_run=False requires approved_by")
         if not _clean_text(intent.approved_at):
             reasons.append("dry_run=False requires approved_at")
 
-    if intent.approved and (not _clean_text(intent.approved_by) or not _clean_text(intent.approved_at)):
+    if approved is True and (not _clean_text(intent.approved_by) or not _clean_text(intent.approved_at)):
         reasons.append("approved intents must include approved_by and approved_at")
 
     if risk is not None and risk.needs_human:
@@ -269,6 +278,8 @@ def validate_execution_intent(
             symbol=symbol,
             side=side,
             order_type=order_type,
+            dry_run=dry_run,
+            approved=approved,
         )
 
     return ExecutionValidationResult(
