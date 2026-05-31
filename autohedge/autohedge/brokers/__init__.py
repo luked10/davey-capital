@@ -1,18 +1,18 @@
-from autohedge.brokers.base_boi import (
+from autohedge.brokers.base_agent import (
     AccountSnapshotBoi,
     BrokerBoi,
     BrokerFillBoi,
     BrokerOrderBoi,
     BrokerPositionBoi,
 )
-from autohedge.brokers.factory_boi import BROKER_BOI_REGISTRY, get_broker_boi
-from autohedge.brokers.paper_boi import PaperBrokerBoi
-from autohedge.brokers.robinhood_boi import RobinhoodBrokerBoi
-from autohedge.brokers.robinhood_state_boi import (
+from autohedge.brokers.factory_agent import BROKER_AGENT_REGISTRY, get_broker_agent
+from autohedge.brokers.paper_agent import PaperBrokerBoi
+from autohedge.brokers.robinhood_agent import RobinhoodBrokerBoi
+from autohedge.brokers.robinhood_state_agent import (
     RobinhoodStateBoi,
     RobinhoodStateStoreBoi,
 )
-from autohedge.brokers.solana_boi import SolanaBrokerBoi
+from autohedge.brokers.solana_agent import SolanaBrokerBoi
 
 __all__ = [
     'AccountSnapshotBoi',
@@ -20,8 +20,8 @@ __all__ = [
     'BrokerFillBoi',
     'BrokerOrderBoi',
     'BrokerPositionBoi',
-    'BROKER_BOI_REGISTRY',
-    'get_broker_boi',
+    'BROKER_AGENT_REGISTRY',
+    'get_broker_agent',
     'PaperBrokerBoi',
     'RobinhoodBrokerBoi',
     'RobinhoodStateBoi',

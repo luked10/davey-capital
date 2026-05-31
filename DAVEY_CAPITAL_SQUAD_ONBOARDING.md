@@ -10,9 +10,9 @@ Date started: Tuesday, May 12, 2026
 - Risk agent
 
 ## Orchestration pattern
-- Research boi: gather the role goals, constraints, workflows, and required outputs for each agent.
-- Execution boi: turn the research into finalized profiles, instruction blocks, and repo-ready artifacts.
-- Quality check boi: verify every profile is complete, consistent, and aligned with the Davey Capital strategy.
+- Research agent: gather the role goals, constraints, workflows, and required outputs for each agent.
+- Execution agent: turn the research into finalized profiles, instruction blocks, and repo-ready artifacts.
+- Quality check agent: verify every profile is complete, consistent, and aligned with the Davey Capital strategy.
 
 ## Intake checklist
 For each agent, capture:
@@ -32,7 +32,7 @@ For each agent, capture:
 - Research, execution, and quality review steps are now separated so the intake can be completed cleanly.
 
 ## Next steps
-1. Research boi gathers the detailed role brief for each agent.
-2. Execution boi drafts the final agent profiles and instructions.
-3. Quality check boi validates the profiles before they are locked in.
+1. Research agent gathers the detailed role brief for each agent.
+2. Execution agent drafts the final agent profiles and instructions.
+3. Quality check agent validates the profiles before they are locked in.
 4. Log the finalized onboarding package back into the repo.

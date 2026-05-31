@@ -10,22 +10,22 @@ Stateless trading bridge. The repository is the source of truth for workflow che
 
 ## Daily checkpoints
 
-- sessions/pre_market_boi.md
-- sessions/execution_boi.md
-- sessions/midday_boi.md
-- sessions/close_boi.md
+- sessions/pre_market_agent.md
+- sessions/execution_agent.md
+- sessions/midday_agent.md
+- sessions/close_agent.md
 
 ## Audit trail templates
 
-- sessions/decision_log_boi.md
-- sessions/fill_report_boi.md
+- sessions/decision_log_agent.md
+- sessions/fill_report_agent.md
 
 ## Broker abstraction layer
 
-- autohedge/autohedge/brokers/base_boi.py
-- autohedge/autohedge/brokers/robinhood_boi.py
-- autohedge/autohedge/brokers/solana_boi.py
-- autohedge/autohedge/brokers/factory_boi.py
+- autohedge/autohedge/brokers/base_agent.py
+- autohedge/autohedge/brokers/robinhood_agent.py
+- autohedge/autohedge/brokers/solana_agent.py
+- autohedge/autohedge/brokers/factory_agent.py
 
 The adapter layer keeps broker-specific behavior behind a shared contract so execution can switch between Robinhood and Solana without changing the rest of the workflow.
 
