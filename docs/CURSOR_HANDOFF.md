@@ -84,3 +84,32 @@
 - Review overnight scaffolding diffs for naming/placement conventions and long-term ownership.
 - Decide whether to keep the new contracts in `contracts/` or move into a dedicated runtime package.
 - Approve or reject the deferred `trade_journal_parsers.py` vectorization follow-up.
+
+## Overnight Build #6 Parser Vectorization (2026-05-31)
+- Branch: `feature/overnight-build-6-parser-vectorization`
+- Scope: isolated parser internals + deterministic parity smoke only.
+
+### Implemented in this slice
+- Vectorized mechanical row-extraction internals in `vibe-trading/agent/src/tools/trade_journal_parsers.py` for:
+  - `parse_tonghuashun`
+  - `parse_eastmoney`
+  - `parse_futu`
+  - `parse_generic`
+- Added deterministic parity smoke with legacy inline baselines:
+  - `scripts/smoke_trade_journal_parser_vectorization.py`
+
+### Tests run
+- `python3 scripts/smoke_bridge_contract.py`
+- `python3 scripts/smoke_brokers_step2.py`
+- `python3 scripts/smoke_brokers_step3.py`
+- `python3 scripts/smoke_trade_journal_parser_vectorization.py`
+- `python3 scripts/smoke_vectorization_step4.py`
+
+### Deferred / intentionally out of scope
+- No watcher/scheduler/runtime/broker/CLI/model runtime changes in this branch.
+- No contract schema changes required for parser parity.
+- Optional parser benchmark script deferred to keep this slice correctness-first.
+
+### Safety + parity status
+- Output parity status: **EXACT** against legacy parser baselines in smoke coverage.
+- Safety review severity: **NONE** (no network calls, no credentials, no live broker/order paths touched).
