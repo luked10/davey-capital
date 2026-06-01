@@ -103,3 +103,22 @@
 - Full post-merge smoke suite passed for all present scripts.
 - Optional `smoke_local_pipeline_scaffold.py` not present.
 - Generated `__pycache__/` directories may appear during smokes and should be cleaned before commit.
+
+## feature/intent-structured-output-harness (2026-05-31)
+- Files changed:
+  - `scripts/smoke_execution_intent_structured_output.py` (new, deterministic/offline smoke).
+  - `docs/CURSOR_HANDOFF.md` (this section).
+  - No changes to `contracts/bridge_contract.py` (no contract delta needed; existing fail-closed validation already covers all cases).
+- Structured-output cases covered (all assert fail-closed blocking on unsafe, allow only strict-safe):
+  - approved booleans: `True`(bool, with/without approver), `"true"`(str), `1`(int), `None`, missing→default `False`.
+  - dry_run booleans: `True`/`False`(bool), `"false"`(str), `0`(int), missing→default `True`.
+  - approval metadata: only `dry_run=False`+`approved=True`+`approved_by`+`approved_at` passes; missing approver/approval blocks; deserialized `approved=true` alone is insufficient.
+  - order fields: invalid side/order_type, missing broker/symbol, missing quantity+notional, quantity<=0, notional<=0, limit order without/with bad limit_price.
+  - needs_human: `risk.needs_human` and `run.needs_human` block.
+  - conversion guard: `execution_intent_to_broker_order` raises before producing an order for unsafe intents.
+  - serialization: dict + JSON roundtrips never coerce string/int booleans into executable approval; safe defaults preserved.
+- Commands run (all PASS): the full Smoke Command Matrix above plus `python3 scripts/smoke_execution_intent_structured_output.py`.
+- Safety result: SAFETY OK (no live order path widened, no Alpaca/broker calls, no credentials/network, `dry_run` default preserved, strict booleans enforced, validation cannot be bypassed before conversion, no risk-parameter changes).
+- Compatibility result: COMPATIBILITY OK (Step 1-3 and broker smokes pass; dataclass construction and JSON/dict helpers unchanged; new smoke fails on unsafe and passes on safe).
+- Remaining TODOs: none for this slice; future hardening tracked under `feature/watcher-fixtures-schema-hardening`.
+- Push status: NOT PUSHED (single local commit only).
