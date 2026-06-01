@@ -26,6 +26,12 @@ from contracts.bridge_contract import (
     to_json,
     validate_execution_intent,
 )
+from contracts.overnight_scaffold import (
+    OVERNIGHT_SCAFFOLD_VERSION,
+    CandidateEvent,
+    NeedsHumanEvent,
+    PokeBridgeHandoff,
+)
 
 __all__ = [
     "BRIDGE_CONTRACT_VERSION",
@@ -36,6 +42,10 @@ __all__ = [
     "RiskSummary",
     "RunMetadata",
     "SignalPayload",
+    "OVERNIGHT_SCAFFOLD_VERSION",
+    "CandidateEvent",
+    "NeedsHumanEvent",
+    "PokeBridgeHandoff",
     "bridge_envelope_from_dict",
     "bridge_envelope_from_json",
     "execution_intent_from_dict",

@@ -309,22 +309,78 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
         return []
 
     # trades.csv has entry+exit row pairs; extract exit rows (they have pnl != 0)
-    trades = []
     exit_rows = df[df["pnl"] != 0].reset_index(drop=True)
-    for _, row in exit_rows.iterrows():
+    if exit_rows.empty:
+        return []
+
+    row_count = len(exit_rows)
+    symbols = (
+        exit_rows["code"].tolist()
+        if "code" in exit_rows.columns
+        else [""] * row_count
+    )
+    sides = (
+        exit_rows["side"].tolist()
+        if "side" in exit_rows.columns
+        else [""] * row_count
+    )
+    prices = (
+        exit_rows["price"].tolist()
+        if "price" in exit_rows.columns
+        else [0] * row_count
+    )
+    # Legacy dirty-timestamp semantics: when the timestamp COLUMN is present,
+    # NaN / invalid values coerce to NaT (NOT a synthetic "2000-01-01"). The
+    # "2000-01-01" sentinel is only the missing-COLUMN default.
+    timestamps = (
+        pd.to_datetime(exit_rows["timestamp"], errors="coerce").tolist()
+        if "timestamp" in exit_rows.columns
+        else [pd.Timestamp("2000-01-01")] * row_count
+    )
+    quantities = (
+        exit_rows["qty"].tolist()
+        if "qty" in exit_rows.columns
+        else [0] * row_count
+    )
+    pnls = (
+        exit_rows["pnl"].tolist()
+        if "pnl" in exit_rows.columns
+        else [0] * row_count
+    )
+    pnl_pcts = (
+        exit_rows["return_pct"].tolist()
+        if "return_pct" in exit_rows.columns
+        else [0] * row_count
+    )
+    reasons = (
+        exit_rows["reason"].tolist()
+        if "reason" in exit_rows.columns
+        else ["signal"] * row_count
+    )
+    holding_days = (
+        exit_rows["holding_days"].tolist()
+        if "holding_days" in exit_rows.columns
+        else [0] * row_count
+    )
+
+    trades: List[TradeRecord] = []
+    for index in range(row_count):
+        # Dirty/invalid timestamps stay NaT (legacy semantics); do not invent a
+        # default date for them.
+        timestamp = timestamps[index]
         trades.append(TradeRecord(
-            symbol=str(row.get("code", "")),
-            direction=1 if row.get("side") == "sell" else -1,
+            symbol=str(symbols[index]),
+            direction=1 if sides[index] == "sell" else -1,
             entry_price=0.0,
-            exit_price=float(row.get("price", 0)),
-            entry_time=pd.Timestamp(row.get("timestamp", "2000-01-01")),
-            exit_time=pd.Timestamp(row.get("timestamp", "2000-01-01")),
-            size=float(row.get("qty", 0)),
+            exit_price=float(prices[index]),
+            entry_time=pd.Timestamp(timestamp),
+            exit_time=pd.Timestamp(timestamp),
+            size=float(quantities[index]),
             leverage=1.0,
-            pnl=float(row.get("pnl", 0)),
-            pnl_pct=float(row.get("return_pct", 0)),
-            exit_reason=str(row.get("reason", "signal")),
-            holding_bars=int(row.get("holding_days", 0)),
+            pnl=float(pnls[index]),
+            pnl_pct=float(pnl_pcts[index]),
+            exit_reason=str(reasons[index]),
+            holding_bars=int(holding_days[index]),
             commission=0.0,
         ))
     return trades

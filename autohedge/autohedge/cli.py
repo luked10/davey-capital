@@ -141,49 +141,53 @@ def _welcome() -> None:
     )
 
 
-def run_repl() -> None:
+def run_repl(persist: bool = False) -> None:
+    from autohedge.runtime_scaffold import build_repl_runner
+
     _welcome()
+    # Default: a FRESH AutoHedge per task (no cross-task state bleed).
+    # Persistent engine reuse is opt-in only via --persist.
+    engine = build_repl_runner(persist=persist)
+    try:
+        while True:
+            try:
+                prompt = Text("> ", style="bold cyan")
+                console.print(prompt, end="")
+                line = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]Goodbye.[/]")
+                break
 
-    while True:
-        try:
-            prompt = Text("> ", style="bold cyan")
-            console.print(prompt, end="")
-            line = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Goodbye.[/]")
-            break
+            if not line:
+                continue
 
-        if not line:
-            continue
+            lower = line.lower()
+            if lower in ("quit", "exit", "q"):
+                console.print("[dim]Goodbye.[/]")
+                break
 
-        lower = line.lower()
-        if lower in ("quit", "exit", "q"):
-            console.print("[dim]Goodbye.[/]")
-            break
+            if lower in ("help", "?", "h"):
+                for t in TIPS:
+                    console.print(f"  [dim]·[/] {t}")
+                continue
 
-        if lower in ("help", "?", "h"):
-            for t in TIPS:
-                console.print(f"  [dim]·[/] {t}")
-            continue
-
-        # Treat as task prompt
-        task = line
-        _append_recent(task)
-        try:
-            from autohedge import AutoHedge
-
-            system = AutoHedge()
-            console.print("[dim]Running...[/]")
-            result = system.run(task=task)
-            console.print(
-                Panel(
-                    str(result)[:2000],
-                    title="Result",
-                    border_style="green",
+            # Treat as task prompt
+            task = line
+            _append_recent(task)
+            try:
+                console.print("[dim]Running...[/]")
+                result = engine.run_task(task=task)
+                console.print(
+                    Panel(
+                        str(result)[:2000],
+                        title="Result",
+                        border_style="green",
+                    )
                 )
-            )
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/]")
+            except Exception as e:
+                console.print(f"[red]Error: {e}[/]")
+    finally:
+        engine.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -211,6 +215,14 @@ Examples:
         version=f"%(prog)s {VERSION}",
         help="Show program version and exit.",
     )
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help=(
+            "Reuse a single AutoHedge engine across tasks in the REPL. "
+            "Off by default; each task runs on a fresh, isolated engine."
+        ),
+    )
     return parser
 
 
@@ -221,8 +233,8 @@ def main() -> None:
     if len(sys.argv) == 2 and sys.argv[1].lower() == "help":
         parser.print_help()
         sys.exit(0)
-    parser.parse_args()  # exits on --help / --version
-    run_repl()
+    args = parser.parse_args()  # exits on --help / --version
+    run_repl(persist=getattr(args, "persist", False))
     sys.exit(0)
 
 
