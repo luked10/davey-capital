@@ -113,3 +113,68 @@
 ### Safety + parity status
 - Output parity status: **EXACT** against legacy parser baselines in smoke coverage.
 - Safety review severity: **NONE** (no network calls, no credentials, no live broker/order paths touched).
+
+## Overnight Build #7 Validation Trade Loader Vectorization (2026-05-31)
+- Branch: `feature/overnight-build-7-validation-loader` (created from `feature/overnight-build-6-parser-vectorization`, not `main`).
+- Scope: isolated `_load_trades` internals in `vibe-trading/backtest/validation.py` + deterministic parity smoke only.
+
+### Changed files
+- Modified: `vibe-trading/backtest/validation.py` (only `_load_trades` internals).
+- Created: `scripts/smoke_validation_trade_loader_vectorization.py`.
+
+### `_load_trades` parity statement
+- EXACT record-by-record parity proven against a legacy reference that is byte-for-byte identical (code lines) to the pre-refactor HEAD baseline `_load_trades`.
+- Compared all `TradeRecord` fields with NaN/NaT-aware equality + strict type checks, across 7 deterministic fixtures:
+  - **A:** normal mixed entry/exit
+  - **B:** missing optional columns
+  - **C:** NaN/blank timestamps
+  - **D:** invalid timestamps
+  - **E:** numeric strings
+  - **F:** sparse rows
+  - **G:** `pnl == 0` filtered
+- Smoke passed identically before and after the refactor.
+- Public signature `_load_trades(run_dir: Path) -> List[TradeRecord]` and output schema unchanged.
+
+### Baseline timestamp behavior observed (preserved)
+- Fallback order:
+  - (a) if the `timestamp` column is absent, all rows default to the string `"2000-01-01"`;
+  - (b) per row, before parsing, `pd.isna(value)` is checked — if NaN/blank, value is replaced with `"2000-01-01"`;
+  - (c) the value is passed to `pd.Timestamp(...)`.
+- NaN/blank: empty/None cell reads as NaN -> caught by `pd.isna` -> substituted with `"2000-01-01"` -> `pd.Timestamp("2000-01-01")`. NaN never reaches `pd.Timestamp`.
+- Invalid (non-NaN) timestamps: `pd.isna` is False, so the bad string flows into `pd.Timestamp(...)` which RAISES pandas `DateParseError` (a `ValueError` subclass); baseline does NOT swallow it — it propagates. The refactor preserves this raise path.
+- Refactor detail: per-row NaN guard vectorized via `Series.where(notna(), "2000-01-01")`, proven equivalent.
+
+### `_load_trades` changes made
+- Replaced 10 repeated `col.tolist() if col in columns else [default]*n` blocks with a single helper `column_or_default(name, default)`.
+- Vectorized the per-row timestamp NaN guard.
+- Replaced index-based loop with a `zip(...)` over column lists.
+- Computed `pd.Timestamp(timestamp)` once per row, reused for `entry_time` and `exit_time`.
+- Unchanged semantics: `side == "sell" -> 1 else -1`; `float()`/`int()` coercions; optional-column defaults; sparse-row handling; `pnl != 0` exit filter; invalid-timestamp raise path.
+
+### Tests run
+- `python3 scripts/smoke_validation_trade_loader_vectorization.py`
+- `python3 scripts/smoke_vectorization_step4.py`
+- `python3 scripts/smoke_trade_journal_parser_vectorization.py`
+- `python3 scripts/smoke_engine_scheduler_step5.py`
+- `python3 scripts/smoke_bridge_contract.py`
+- `python3 scripts/smoke_brokers_step2.py`
+- `python3 scripts/smoke_brokers_step3.py`
+
+### Smoke/Test results — ALL PASS
+- `smoke_validation_trade_loader_vectorization`: **PASS 7/7 cases identical (exit 0)**
+- `smoke_vectorization_step4`: ok
+- `smoke_trade_journal_parser_vectorization`: ok
+- `smoke_engine_scheduler_step5`: ok
+- `smoke_bridge_contract`: ok
+- `smoke_brokers_step2`: ok
+- `smoke_brokers_step3`: ok
+
+### Safety + compatibility status
+- Safety review status: **SAFETY OK** — no BLOCKER/HIGH. Two LOW notes: (1) smoke mutates `sys.path` at import; (2) timestamp NaN guard vectorized via `.where()`, parity-tested. Changes confined to the two in-scope files.
+- Compatibility/parity review status: **COMPATIBILITY OK** — no BLOCKER/HIGH/MEDIUM. Legacy reference byte-for-byte identical to HEAD baseline; comparison logic verified genuinely fail-able. Two LOW notes: (1) `_is_nanlike` defensive-coding observation (can only over-report a diff, never false-pass); (2) fixtures don't directly assert the numeric/float-with-NaN-dtype timestamp-column path (reasoned to hold).
+
+### Deferred TODOs
+- Optionally add a fixture asserting the numeric/float-with-NaN-dtype timestamp column path for `.where()` vs per-row parity.
+
+### No-push status
+- No `git push` performed. No branch switch. One local commit will be created by the coordinator only if all gates pass. Branch remains `feature/overnight-build-7-validation-loader`.
