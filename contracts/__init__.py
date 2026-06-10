@@ -27,10 +27,15 @@ from contracts.bridge_contract import (
     validate_execution_intent,
 )
 from contracts.overnight_scaffold import (
+    LOCAL_POKE_DESTINATION,
     OVERNIGHT_SCAFFOLD_VERSION,
     CandidateEvent,
     NeedsHumanEvent,
     PokeBridgeHandoff,
+    SchemaValidationResult,
+    validate_candidate_event_payload,
+    validate_needs_human_event_payload,
+    validate_poke_handoff_payload,
 )
 
 __all__ = [
@@ -42,10 +47,15 @@ __all__ = [
     "RiskSummary",
     "RunMetadata",
     "SignalPayload",
+    "LOCAL_POKE_DESTINATION",
     "OVERNIGHT_SCAFFOLD_VERSION",
     "CandidateEvent",
     "NeedsHumanEvent",
     "PokeBridgeHandoff",
+    "SchemaValidationResult",
+    "validate_candidate_event_payload",
+    "validate_needs_human_event_payload",
+    "validate_poke_handoff_payload",
     "bridge_envelope_from_dict",
     "bridge_envelope_from_json",
     "execution_intent_from_dict",
