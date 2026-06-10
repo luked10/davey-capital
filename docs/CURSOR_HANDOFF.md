@@ -122,3 +122,58 @@
 - Compatibility result: COMPATIBILITY OK (Step 1-3 and broker smokes pass; dataclass construction and JSON/dict helpers unchanged; new smoke fails on unsafe and passes on safe).
 - Remaining TODOs: none for this slice; future hardening tracked under `feature/watcher-fixtures-schema-hardening`.
 - Push status: NOT PUSHED (single local commit only).
+
+## feature/offline-runtime-scaffold-pack (2026-06-10)
+
+- Scope: local/offline scaffolding only; no live execution, no scheduler promotion, no
+  external Poke/SMS, no API keys, no network calls in any smoke.
+- Slice A — watcher schema hardening: `contracts/overnight_scaffold.py` gained
+  fail-closed validators (`validate_candidate_event_payload`,
+  `validate_needs_human_event_payload`, `validate_poke_handoff_payload`,
+  `SchemaValidationResult`). Poke destination is pinned to
+  `poke_bridge_local_queue`; any other destination fails validation.
+  Smoke: `scripts/smoke_watcher_fixtures_schema.py` (also verifies real watcher
+  artifacts satisfy the schemas).
+- Slice B — circuit breaker scaffold: `autohedge/autohedge/risk/circuit_breaker.py`
+  (`CircuitBreakerConfig` disabled by default, `CircuitBreakerResult`,
+  `evaluate_circuit_breaker`). Disabled config never blocks; enabled config blocks on
+  consecutive-loss / daily-loss / max-open-trades breaches; malformed config or
+  observations fail closed with `needs_human=True`. Config-only: no broker calls, no
+  live position reads. Smoke: `scripts/smoke_risk_circuit_breaker_scaffold.py`.
+- Slice C — cached proposer scaffold: `autohedge/autohedge/proposal/cached_proposer.py`
+  models the Tier 2 prompt-cache split (static `DEFAULT_STATIC_PREFIX` + candidate
+  suffix) with `FakeProposalClient` only. Constructor rejects clients without
+  `is_local=True`. All model output goes through `validate_execution_intent`;
+  invalid JSON / contract mismatches / unsafe or unapproved intents /
+  `risk|run.needs_human` all fail closed. Cache/model/provider token metadata recorded
+  per call. Smoke: `scripts/smoke_cached_proposer_scaffold.py`.
+- Slice D — runtime state scaffold: `autohedge/autohedge/runtime/runtime_state.py`
+  (`RuntimeState`, `load_runtime_state`, `save_runtime_state`) plus
+  `runtime_state.example.json` (credential-free). Malformed/missing state fails closed
+  with a NEEDS_HUMAN-style result; `live_mode=True` always requires human review.
+  Smoke: `scripts/smoke_runtime_state_scaffold.py`.
+- Slice E — audit artifacts: `autohedge/autohedge/audit/artifacts.py`
+  (`AuditArtifactWriter`) writes deterministic `decision-/needs_human-/intent-/fill-*.json`
+  artifacts with timestamp/model/provider envelope fields. Intent artifacts embed the
+  validation verdict and `executed: false`; fill artifacts are shape-only and reject
+  anything that is not strictly `dry_run=True`. Unsafe artifact ids (path traversal)
+  fail closed. Smoke: `scripts/smoke_audit_artifacts_scaffold.py`.
+- Slice F — nova-alpha local report: `nova-alpha/report_scaffold.py`
+  (`load_local_artifacts`, `render_daily_report`, `write_daily_report`) renders a
+  deterministic markdown daily report (candidates, Poke triage decisions, proposal
+  summaries, NEEDS_HUMAN events, circuit breaker status) from local artifacts only.
+  Smoke: `scripts/smoke_nova_alpha_report_scaffold.py`.
+- Slice G — repo memory: added `CLAUDE.md` at repo root (architecture, safety
+  invariants, smoke matrix, workflow, model routing) and this section.
+- New smoke matrix additions (all deterministic/offline):
+  - `python3 scripts/smoke_watcher_fixtures_schema.py`
+  - `python3 scripts/smoke_risk_circuit_breaker_scaffold.py`
+  - `python3 scripts/smoke_cached_proposer_scaffold.py`
+  - `python3 scripts/smoke_runtime_state_scaffold.py`
+  - `python3 scripts/smoke_audit_artifacts_scaffold.py`
+  - `python3 scripts/smoke_nova_alpha_report_scaffold.py`
+- Safety result: SAFETY OK — no live order path, no Alpaca/Robinhood calls, no broker
+  account reads, no credentials/env-var requirements, scheduler untouched
+  (`enabled=False` default), Poke delivery local-only, broker execution behavior and
+  Build 6/7 parser/validation files unchanged.
+- Push status: NOT PUSHED (local commits only; human review required).
