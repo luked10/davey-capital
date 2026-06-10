@@ -1,0 +1,23 @@
+{
+  "active_broker": "paper",
+  "circuit_breaker_status": {
+    "allowed": true,
+    "enabled": false,
+    "reason": "circuit breaker disabled (default no-op)",
+    "triggered_rules": []
+  },
+  "dry_run": true,
+  "last_error": "",
+  "last_health_check": "2026-06-10T00:00:00Z",
+  "latest_signal_ids": [
+    "example-signal-0001",
+    "example-signal-0002"
+  ],
+  "live_mode": false,
+  "positions_summary": {
+    "note": "example only - no live account data",
+    "open_positions": 0,
+    "source": "repo-backed artifacts"
+  },
+  "updated_at": "2026-06-10T00:00:00Z"
+}
