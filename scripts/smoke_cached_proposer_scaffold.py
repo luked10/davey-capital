@@ -166,19 +166,28 @@ def main() -> None:
     assert result.allowed is False and result.needs_human is True
     assert silent_client.calls == [], "client must not be called for malformed candidate"
 
-    # Non-local clients are rejected at construction (no network promotion).
+    # Non-local clients can now be passed explicitly, but still go through the
+    # same parse/validation boundary.
     class NotLocalClient:
         is_local = False
 
         def complete(self, *, static_prefix: str, candidate_suffix: str):
-            raise AssertionError("must never be called")
+            return mod.FakeProposalResponse(
+                text=VALID_INTENT_JSON,
+                model="not-local-smoke",
+                provider="explicit-smoke-client",
+                cache_read_tokens=7,
+                cache_write_tokens=11,
+            )
 
-    try:
-        Proposer(NotLocalClient())
-    except ValueError as exc:
-        assert "is_local" in str(exc)
-    else:
-        raise AssertionError("non-local client must be rejected")
+    result = Proposer(NotLocalClient()).propose(
+        CANDIDATE,
+        risk=SAFE_RISK,
+        run=SAFE_RUN,
+    )
+    assert result.allowed is True, result.reasons
+    assert result.cache_metadata["provider"] == "explicit-smoke-client"
+    assert result.cache_metadata["cache_read_tokens"] == 7
 
     # Module must not import provider SDKs or networking machinery.
     source = MODULE_PATH.read_text(encoding="utf-8")

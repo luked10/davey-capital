@@ -1,12 +1,12 @@
-"""Local-only cached proposer scaffold (Tier 2 shape, fake client only).
+"""Cached proposer scaffold (Tier 2 shape, fake client by default).
 
 Models the prompt-caching structure planned for rare Sonnet/Fable structured
 proposal calls: a static cacheable prefix (system doctrine + schema) plus a
-small variable candidate suffix. This module performs NO network calls,
-requires NO API keys or environment variables, and never touches brokers or
-the scheduler. Only clients that explicitly declare ``is_local = True`` are
-accepted, so a real networked provider client cannot be wired in here without
-deliberate, human-reviewed changes.
+small variable candidate suffix. The default fake client performs NO network
+calls, requires NO API keys or environment variables, and never touches brokers
+or the scheduler. Networked proposal clients are allowed only when callers
+explicitly instantiate and pass one in; every output still passes through the
+same fail-closed validation boundary before being surfaced.
 
 All model output passes through ``validate_execution_intent`` before being
 surfaced; unsafe or unapproved intents fail closed.
@@ -41,11 +41,11 @@ DEFAULT_STATIC_PREFIX = (
 
 
 class ProposalClient(Protocol):
-    """Interface a (fake) proposal client must satisfy."""
+    """Interface a proposal client must satisfy."""
 
     is_local: bool
 
-    def complete(self, *, static_prefix: str, candidate_suffix: str) -> "FakeProposalResponse":
+    def complete(self, *, static_prefix: str, candidate_suffix: str) -> Any:
         ...
 
 
@@ -123,7 +123,12 @@ def _parse_intent_json(raw_text: str, reasons: list[str]) -> ExecutionIntent | N
 
 
 class CachedProposerScaffold:
-    """Tier 2 proposal scaffold wired to a local fake client only."""
+    """Tier 2 proposal scaffold with a pluggable client.
+
+    Fake clients keep the offline smokes deterministic. Real clients may be
+    passed in explicitly, but their outputs still cannot bypass
+    ``validate_execution_intent``.
+    """
 
     def __init__(
         self,
@@ -131,12 +136,6 @@ class CachedProposerScaffold:
         *,
         static_prefix: str = DEFAULT_STATIC_PREFIX,
     ) -> None:
-        if getattr(client, "is_local", False) is not True:
-            raise ValueError(
-                "CachedProposerScaffold only accepts local fake clients "
-                "(client.is_local must be True); networked clients require "
-                "explicit human-reviewed promotion"
-            )
         self._client = client
         self.static_prefix = static_prefix
 

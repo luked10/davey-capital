@@ -36,6 +36,7 @@ solders = "*"
 yfinance = "*"
 python-dotenv = "*"
 robin-stocks = "*"
+anthropic = "*"
 
 
 [tool.poetry.group.lint.dependencies]
