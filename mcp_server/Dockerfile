@@ -7,7 +7,9 @@ RUN pip install --no-cache-dir -r /app/mcp_server/requirements.txt
 
 COPY . /app
 
-ENV DAVEY_ROOT=/app
+RUN mkdir -p /data
+
+ENV DAVEY_ROOT=/data
 EXPOSE 8080
 
 CMD ["python3", "mcp_server/server.py"]

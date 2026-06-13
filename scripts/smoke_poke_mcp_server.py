@@ -99,9 +99,10 @@ def main() -> None:
         assert rows[0]["reason"] == "manual smoke reject"
 
         status = service.get_system_status()
+        assert status["active_broker"] == "paper"
         assert status["dry_run"] is True
         assert status["live_mode"] is False
-        assert "runtime state file not found" in status["last_error"]
+        assert status["last_error"] == ""
 
     source = SERVER_PATH.read_text(encoding="utf-8")
     assert "execution_intent_to_broker_order" not in source

@@ -23,19 +23,35 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import Thread
 from typing import Any
 
 
-REPO_ROOT = Path(os.getenv("DAVEY_ROOT", Path(__file__).resolve().parents[1])).resolve()
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+CODE_ROOT = Path(__file__).resolve().parents[1]
 
-AUDIT_MODULE_PATH = REPO_ROOT / "autohedge" / "autohedge" / "audit" / "artifacts.py"
+
+def _default_davey_root() -> Path:
+    configured = os.getenv("DAVEY_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if any(os.getenv(name) for name in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")):
+        return Path("/app")
+    return CODE_ROOT.resolve()
+
+
+DAVEY_ROOT = _default_davey_root()
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
+
+AUDIT_MODULE_PATH = CODE_ROOT / "autohedge" / "autohedge" / "audit" / "artifacts.py"
 RUNTIME_STATE_MODULE_PATH = (
-    REPO_ROOT / "autohedge" / "autohedge" / "runtime" / "runtime_state.py"
+    CODE_ROOT / "autohedge" / "autohedge" / "runtime" / "runtime_state.py"
 )
 SONNET_MODULE_PATH = (
-    REPO_ROOT / "autohedge" / "autohedge" / "proposal" / "sonnet_client.py"
+    CODE_ROOT / "autohedge" / "autohedge" / "proposal" / "sonnet_client.py"
+)
+RUNTIME_SCAFFOLD_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "runtime_scaffold.py"
 )
 
 
@@ -52,8 +68,13 @@ def _load_module(name: str, path: Path):
 audit_module = _load_module("davey_mcp_audit_artifacts", AUDIT_MODULE_PATH)
 runtime_state_module = _load_module("davey_mcp_runtime_state", RUNTIME_STATE_MODULE_PATH)
 sonnet_module = _load_module("davey_mcp_sonnet_client", SONNET_MODULE_PATH)
+runtime_scaffold_module = _load_module(
+    "davey_mcp_runtime_scaffold",
+    RUNTIME_SCAFFOLD_MODULE_PATH,
+)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
+default_runtime_state = runtime_state_module.default_runtime_state
 load_runtime_state = runtime_state_module.load_runtime_state
 SonnetProposalClient = sonnet_module.SonnetProposalClient
 
@@ -69,10 +90,17 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
         if not line.strip():
             continue
-        payload = json.loads(line)
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
         if isinstance(payload, dict):
             rows.append(payload)
     return rows
@@ -123,8 +151,8 @@ def _proposal_text(
 class PokeBridgeService:
     """Stateful local bridge service for one running MCP server process."""
 
-    def __init__(self, *, repo_root: Path = REPO_ROOT) -> None:
-        self.repo_root = repo_root
+    def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
+        self.repo_root = Path(repo_root)
         self.seen_ids: set[str] = set()
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
 
@@ -139,7 +167,10 @@ class PokeBridgeService:
     def _queue_paths(self) -> list[Path]:
         if not self.overnight_root.exists():
             return []
-        return sorted(self.overnight_root.glob("*/poke_bridge_queue.jsonl"))
+        try:
+            return sorted(self.overnight_root.glob("*/poke_bridge_queue.jsonl"))
+        except OSError:
+            return []
 
     def _find_handoff(self, handoff_id: str) -> tuple[dict[str, Any], str] | None:
         for path in self._queue_paths():
@@ -381,12 +412,16 @@ class PokeBridgeService:
     def get_system_status(self) -> dict[str, Any]:
         result = load_runtime_state(self.repo_root / "runtime_state.json")
         if not result.ok or result.state is None:
+            state = default_runtime_state(updated_at="")
+            missing_only = result.reasons == (
+                f"runtime state file not found: {self.repo_root / 'runtime_state.json'}",
+            )
             return {
-                "active_broker": "",
-                "dry_run": True,
-                "live_mode": False,
-                "circuit_breaker_status": {},
-                "last_error": "; ".join(result.reasons),
+                "active_broker": state.active_broker,
+                "dry_run": state.dry_run,
+                "live_mode": state.live_mode,
+                "circuit_breaker_status": state.circuit_breaker_status,
+                "last_error": "" if missing_only else "; ".join(result.reasons),
             }
         state = result.state
         return {
@@ -399,6 +434,35 @@ class PokeBridgeService:
 
 
 SERVICE = PokeBridgeService()
+_SCHEDULER_THREAD: Thread | None = None
+
+
+def _scheduler_enabled() -> bool:
+    return os.getenv("DAVEY_SCHEDULER_ENABLED", "").strip() == "1"
+
+
+def _run_scheduler_start() -> None:
+    try:
+        runtime_scaffold_module.start()
+    except Exception as exc:
+        print(f"scheduler start failed safely: {exc}", file=sys.stderr)
+
+
+def start_scheduler_background() -> bool:
+    """Start the opt-in scheduler without blocking the MCP/SSE server."""
+    global _SCHEDULER_THREAD
+
+    if not _scheduler_enabled():
+        return False
+    if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+        return True
+    _SCHEDULER_THREAD = Thread(
+        target=_run_scheduler_start,
+        name="davey-scheduler-start",
+        daemon=True,
+    )
+    _SCHEDULER_THREAD.start()
+    return True
 
 
 def get_pending_candidates() -> list[dict[str, Any]]:
@@ -451,6 +515,7 @@ def build_mcp_app():
 
 
 def main() -> None:
+    start_scheduler_background()
     app = build_mcp_app()
     app.run(transport="sse")
 

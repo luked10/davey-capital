@@ -1,0 +1,1 @@
+{"candidate_event_id": "test-candidate-0001", "created_at": "2026-06-12T20:00:00Z", "destination": "poke_bridge_local_queue", "dry_run": true, "handoff_id": "test-handoff-0001", "metadata": {"confidence": 0.85, "side": "buy", "symbol": "NVDA"}, "run_id": "test-session"}

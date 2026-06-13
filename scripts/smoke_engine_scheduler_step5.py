@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_MODULE = REPO_ROOT / "autohedge" / "autohedge" / "runtime_scaffold.py"
@@ -27,7 +29,21 @@ def _load_runtime_module():
 
 
 def main() -> None:
-    runtime = _load_runtime_module()
+    with tempfile.TemporaryDirectory(prefix="runtime-scaffold-root-") as tmp:
+        previous_davey_root = os.environ.get("DAVEY_ROOT")
+        os.environ["DAVEY_ROOT"] = tmp
+        try:
+            runtime = _load_runtime_module()
+            written = runtime.write_runtime_state(updated_at="2026-06-12T00:00:00Z")
+        finally:
+            if previous_davey_root is None:
+                os.environ.pop("DAVEY_ROOT", None)
+            else:
+                os.environ["DAVEY_ROOT"] = previous_davey_root
+
+        assert written == Path(tmp).resolve() / "runtime_state.json"
+        assert written.exists()
+
     engine_cls = runtime.PersistentAutoHedgeEngine
     scheduler_cls = runtime.LocalSchedulerScaffold
 
@@ -110,6 +126,66 @@ def main() -> None:
     assert invocations == ["ran"]
     scheduler.stop()
     assert scheduler.is_running is False
+
+    old_enabled = os.environ.pop("DAVEY_SCHEDULER_ENABLED", None)
+    old_root = os.environ.get("DAVEY_ROOT")
+    try:
+        assert runtime.scheduler_enabled_from_env() is False
+        assert runtime.SCHEDULER_INTERVAL_SECONDS == 300
+        disabled_scheduler = runtime.build_scheduler(
+            fetcher=lambda: [],
+            prefer_apscheduler=False,
+        )
+        assert disabled_scheduler.enabled is False
+        assert disabled_scheduler.start() is False
+
+        with tempfile.TemporaryDirectory(prefix="scheduler-start-smoke-") as tmp:
+            os.environ["DAVEY_ROOT"] = tmp
+            os.environ["DAVEY_SCHEDULER_ENABLED"] = "1"
+
+            def fake_fetch_candidates():
+                return [
+                    {
+                        "symbol": "NVDA",
+                        "side": "buy",
+                        "confidence": 0.8,
+                        "strategy": "smoke",
+                        "source": "smoke_market_feed",
+                        "dry_run": True,
+                    }
+                ]
+
+            start_result = runtime.start(
+                prefer_apscheduler=False,
+                fetcher=fake_fetch_candidates,
+            )
+            assert start_result["enabled"] is True
+            assert start_result["started"] is True
+            assert start_result["backend"] == "stdlib"
+            assert start_result["jobs"][0]["interval_seconds"] == 300
+            initial = start_result["initial_result"]
+            assert len(initial) == 1
+            cycle_result = initial[0]["result"]
+            assert cycle_result["candidate_count"] == 1
+            assert cycle_result["summary"]["processed"] == 1
+            assert cycle_result["summary"]["ok"] == 1
+            queue_path = (
+                Path(tmp)
+                / "logs"
+                / "overnight"
+                / "scheduler"
+                / "poke_bridge_queue.jsonl"
+            )
+            assert queue_path.exists()
+    finally:
+        if old_enabled is None:
+            os.environ.pop("DAVEY_SCHEDULER_ENABLED", None)
+        else:
+            os.environ["DAVEY_SCHEDULER_ENABLED"] = old_enabled
+        if old_root is None:
+            os.environ.pop("DAVEY_ROOT", None)
+        else:
+            os.environ["DAVEY_ROOT"] = old_root
 
     print("engine scheduler step5 smoke: ok")
 

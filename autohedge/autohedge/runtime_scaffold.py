@@ -3,12 +3,177 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import importlib.util
+import os
+from pathlib import Path
+import sys
 from threading import Lock
 from typing import Any, Callable
 
 
 EngineFactory = Callable[[], Any]
 JobCallable = Callable[[], Any]
+SCHEDULER_INTERVAL_SECONDS = 5 * 60
+SCHEDULER_JOB_ID = "tier0-market-feed-watcher"
+_ACTIVE_SCHEDULER: Any | None = None
+
+
+def _utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _repo_root() -> Path:
+    configured = os.getenv("DAVEY_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if any(os.getenv(name) for name in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")):
+        return Path("/app")
+    return Path(__file__).resolve().parents[2]
+
+
+def scheduler_enabled_from_env() -> bool:
+    """Opt-in scheduler gate; disabled unless explicitly set to ``1``."""
+    return os.getenv("DAVEY_SCHEDULER_ENABLED", "").strip() == "1"
+
+
+def _load_local_module(name: str, relative_path: str):
+    module_path = Path(__file__).resolve().parent / relative_path
+    spec = importlib.util.spec_from_file_location(name, str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def runtime_state_path(repo_root: str | Path | None = None) -> Path:
+    """Return the shared runtime_state.json path for MCP/Poke readers."""
+    root = Path(repo_root).expanduser().resolve() if repo_root is not None else _repo_root()
+    return root / "runtime_state.json"
+
+
+def write_runtime_state(
+    state: Any | None = None,
+    *,
+    updated_at: str | None = None,
+    repo_root: str | Path | None = None,
+) -> Path:
+    """Write runtime_state.json under DAVEY_ROOT by default."""
+    try:
+        from autohedge.runtime.runtime_state import default_runtime_state, save_runtime_state
+    except Exception:
+        runtime_state = _load_local_module(
+            "davey_runtime_state_scaffold",
+            "runtime/runtime_state.py",
+        )
+        default_runtime_state = runtime_state.default_runtime_state
+        save_runtime_state = runtime_state.save_runtime_state
+
+    runtime_state_value = (
+        state if state is not None else default_runtime_state(updated_at=updated_at)
+    )
+    return save_runtime_state(
+        runtime_state_value,
+        runtime_state_path(repo_root),
+        updated_at=updated_at,
+    )
+
+
+def _load_watcher_classes():
+    try:
+        from autohedge.overnight_scaffold import (
+            DeterministicTier0Watcher,
+            OvernightArtifactWriter,
+        )
+    except Exception:
+        overnight = _load_local_module(
+            "davey_runtime_overnight_scaffold",
+            "overnight_scaffold.py",
+        )
+        DeterministicTier0Watcher = overnight.DeterministicTier0Watcher
+        OvernightArtifactWriter = overnight.OvernightArtifactWriter
+    return DeterministicTier0Watcher, OvernightArtifactWriter
+
+
+def _load_fetch_candidates():
+    try:
+        from autohedge.data.market_feed import fetch_candidates
+    except Exception:
+        market_feed = _load_local_module(
+            "davey_runtime_market_feed",
+            "data/market_feed.py",
+        )
+        fetch_candidates = market_feed.fetch_candidates
+    return fetch_candidates
+
+
+def run_watcher_cycle(
+    *,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    repo_root: str | Path | None = None,
+    fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Fetch local market candidates and hand them to the deterministic watcher."""
+    root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
+    clean_session_id = (
+        session_id
+        or os.getenv("DAVEY_SESSION_ID", "").strip()
+        or "scheduler"
+    )
+    clean_run_id = run_id or f"scheduler-{_utc_now_compact()}"
+    fetch_candidates = fetcher or _load_fetch_candidates()
+    DeterministicTier0Watcher, OvernightArtifactWriter = _load_watcher_classes()
+
+    fetch_error = ""
+    try:
+        payloads = fetch_candidates()
+    except Exception as exc:
+        fetch_error = str(exc)
+        payloads = []
+    writer = OvernightArtifactWriter(
+        session_id=clean_session_id,
+        artifact_root=root / "logs" / "overnight",
+    )
+    watcher = DeterministicTier0Watcher(
+        run_id=clean_run_id,
+        writer=writer,
+        dry_run=True,
+        enable_poke_handoff=True,
+    )
+    result = watcher.run_once(payloads)
+    result["candidate_count"] = len(payloads)
+    result["artifact_dir"] = str(writer.artifact_dir)
+    result["fetch_error"] = fetch_error
+    return result
+
+
+def build_scheduler(
+    *,
+    enabled: bool | None = None,
+    fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+    repo_root: str | Path | None = None,
+    session_id: str | None = None,
+    prefer_apscheduler: bool = True,
+) -> LocalSchedulerScaffold:
+    scheduler = LocalSchedulerScaffold(
+        enabled=scheduler_enabled_from_env() if enabled is None else enabled,
+        dry_run=True,
+        prefer_apscheduler=prefer_apscheduler,
+    )
+    scheduler.register_interval_job(
+        SCHEDULER_JOB_ID,
+        lambda: run_watcher_cycle(
+            session_id=session_id,
+            repo_root=repo_root,
+            fetcher=fetcher,
+        ),
+        seconds=SCHEDULER_INTERVAL_SECONDS,
+        metadata={"source": "yfinance_market_feed"},
+    )
+    return scheduler
 
 
 def default_engine_factory() -> Any:
@@ -231,3 +396,46 @@ class LocalSchedulerScaffold:
         if self._scheduler is not None and self._running:
             self._scheduler.shutdown(wait=False)
         self._running = False
+
+
+def start(
+    *,
+    run_initial_cycle: bool = True,
+    prefer_apscheduler: bool = True,
+    fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Register the market watcher job and start only when env-enabled.
+
+    Importing this module has no scheduler side effects. This explicit entry
+    point is safe for one-cycle verification and for MCP server startup.
+    """
+    global _ACTIVE_SCHEDULER
+
+    enabled = scheduler_enabled_from_env()
+    scheduler = build_scheduler(
+        enabled=enabled,
+        fetcher=fetcher,
+        prefer_apscheduler=prefer_apscheduler,
+    )
+    initial_result = None
+    if run_initial_cycle:
+        initial_result = scheduler.run_pending_once()
+    started = scheduler.start()
+    if started:
+        _ACTIVE_SCHEDULER = scheduler
+    return {
+        "enabled": enabled,
+        "started": started,
+        "backend": scheduler.backend,
+        "interval_seconds": SCHEDULER_INTERVAL_SECONDS,
+        "jobs": [
+            {
+                "job_id": job.job_id,
+                "interval_seconds": job.interval_seconds,
+                "dry_run": job.dry_run,
+                "metadata": job.metadata,
+            }
+            for job in scheduler.snapshot_jobs()
+        ],
+        "initial_result": initial_result,
+    }
