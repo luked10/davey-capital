@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -169,6 +170,11 @@ def main() -> None:
             assert cycle_result["candidate_count"] == 1
             assert cycle_result["summary"]["processed"] == 1
             assert cycle_result["summary"]["ok"] == 1
+            assert cycle_result["fetch_error"] == ""
+            runtime_state_path = Path(cycle_result["runtime_state_path"])
+            assert runtime_state_path == Path(tmp).resolve() / "runtime_state.json"
+            runtime_state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
+            assert runtime_state["circuit_breaker_status"] == "normal"
             queue_path = (
                 Path(tmp)
                 / "logs"

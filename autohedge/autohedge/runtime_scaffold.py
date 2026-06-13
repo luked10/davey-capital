@@ -18,6 +18,9 @@ JobCallable = Callable[[], Any]
 SCHEDULER_INTERVAL_SECONDS = 5 * 60
 SCHEDULER_JOB_ID = "tier0-market-feed-watcher"
 _ACTIVE_SCHEDULER: Any | None = None
+_RUNTIME_STATE_MODULE: Any | None = None
+_CIRCUIT_BREAKER_MODULE: Any | None = None
+_OBSERVATIONS_MODULE: Any | None = None
 
 
 def _utc_now_compact() -> str:
@@ -59,6 +62,22 @@ def runtime_state_path(repo_root: str | Path | None = None) -> Path:
     return root / "runtime_state.json"
 
 
+def _load_runtime_state_module():
+    global _RUNTIME_STATE_MODULE
+
+    if _RUNTIME_STATE_MODULE is not None:
+        return _RUNTIME_STATE_MODULE
+    try:
+        from autohedge.runtime import runtime_state
+    except Exception:
+        runtime_state = _load_local_module(
+            "davey_runtime_state_scaffold",
+            "runtime/runtime_state.py",
+        )
+    _RUNTIME_STATE_MODULE = runtime_state
+    return runtime_state
+
+
 def write_runtime_state(
     state: Any | None = None,
     *,
@@ -66,15 +85,9 @@ def write_runtime_state(
     repo_root: str | Path | None = None,
 ) -> Path:
     """Write runtime_state.json under DAVEY_ROOT by default."""
-    try:
-        from autohedge.runtime.runtime_state import default_runtime_state, save_runtime_state
-    except Exception:
-        runtime_state = _load_local_module(
-            "davey_runtime_state_scaffold",
-            "runtime/runtime_state.py",
-        )
-        default_runtime_state = runtime_state.default_runtime_state
-        save_runtime_state = runtime_state.save_runtime_state
+    runtime_state = _load_runtime_state_module()
+    default_runtime_state = runtime_state.default_runtime_state
+    save_runtime_state = runtime_state.save_runtime_state
 
     runtime_state_value = (
         state if state is not None else default_runtime_state(updated_at=updated_at)
@@ -87,24 +100,20 @@ def write_runtime_state(
 
 
 def _load_runtime_state_helpers():
-    try:
-        from autohedge.runtime.runtime_state import default_runtime_state
-    except Exception:
-        runtime_state = _load_local_module(
-            "davey_runtime_state_scaffold",
-            "runtime/runtime_state.py",
-        )
-        default_runtime_state = runtime_state.default_runtime_state
-    return default_runtime_state
+    return _load_runtime_state_module().default_runtime_state
 
 
 def _load_circuit_breaker_helpers():
-    try:
-        from autohedge.risk.circuit_breaker import (
-            CircuitBreakerConfig,
-            evaluate_circuit_breaker,
+    global _CIRCUIT_BREAKER_MODULE, _OBSERVATIONS_MODULE
+
+    if _CIRCUIT_BREAKER_MODULE is not None and _OBSERVATIONS_MODULE is not None:
+        return (
+            _CIRCUIT_BREAKER_MODULE.CircuitBreakerConfig,
+            _CIRCUIT_BREAKER_MODULE.evaluate_circuit_breaker,
+            _OBSERVATIONS_MODULE.build_observations,
         )
-        from autohedge.risk.observations import build_observations
+    try:
+        from autohedge.risk import circuit_breaker, observations
     except Exception:
         circuit_breaker = _load_local_module(
             "davey_runtime_circuit_breaker",
@@ -114,10 +123,13 @@ def _load_circuit_breaker_helpers():
             "davey_runtime_observations",
             "risk/observations.py",
         )
-        CircuitBreakerConfig = circuit_breaker.CircuitBreakerConfig
-        evaluate_circuit_breaker = circuit_breaker.evaluate_circuit_breaker
-        build_observations = observations.build_observations
-    return CircuitBreakerConfig, evaluate_circuit_breaker, build_observations
+    _CIRCUIT_BREAKER_MODULE = circuit_breaker
+    _OBSERVATIONS_MODULE = observations
+    return (
+        circuit_breaker.CircuitBreakerConfig,
+        circuit_breaker.evaluate_circuit_breaker,
+        observations.build_observations,
+    )
 
 
 def _load_circuit_breaker_config(repo_root: Path) -> Any:
