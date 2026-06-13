@@ -59,6 +59,12 @@ CIRCUIT_BREAKER_MODULE_PATH = (
 OBSERVATIONS_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "risk" / "observations.py"
 )
+FILE_LOCK_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "file_lock.py"
+)
+SEEN_IDS_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "seen_ids.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -83,6 +89,8 @@ circuit_breaker_module = _load_module(
     CIRCUIT_BREAKER_MODULE_PATH,
 )
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
+file_lock_module = _load_module("davey_mcp_file_lock", FILE_LOCK_MODULE_PATH)
+seen_ids_module = _load_module("davey_mcp_seen_ids", SEEN_IDS_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -91,6 +99,9 @@ SonnetProposalClient = sonnet_module.SonnetProposalClient
 CircuitBreakerConfig = circuit_breaker_module.CircuitBreakerConfig
 evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
+LOCK_SH = file_lock_module.LOCK_SH
+locked_open = file_lock_module.locked_open
+SeenIdsStore = seen_ids_module.SeenIdsStore
 
 from contracts.bridge_contract import ExecutionIntent, validate_execution_intent
 from contracts.overnight_scaffold import validate_poke_handoff_payload
@@ -105,7 +116,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         return []
     rows: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with locked_open(path, "r", lock=LOCK_SH) as handle:
+            lines = handle.read().splitlines()
     except OSError:
         return []
     for line in lines:
@@ -231,7 +243,7 @@ class PokeBridgeService:
 
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
-        self.seen_ids: set[str] = set()
+        self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
 
     @property
@@ -271,14 +283,14 @@ class PokeBridgeService:
                     continue
                 normalized = validation.normalized
                 handoff_id = normalized["handoff_id"]
-                if handoff_id in self.seen_ids:
+                if self.seen_ids.is_seen(handoff_id):
                     continue
                 pending.append(
                     _public_candidate(
                         _candidate_summary(normalized, session_id=session_id)
                     )
                 )
-                self.seen_ids.add(handoff_id)
+                self.seen_ids.mark_seen(handoff_id)
         return pending
 
     def submit_triage_decision(

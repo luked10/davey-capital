@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import importlib.util
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from contracts.bridge_contract import (
@@ -31,6 +33,20 @@ from contracts.bridge_contract import (
 AUDIT_ARTIFACTS_SCAFFOLD_VERSION = "0.1.0"
 
 _ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _load_file_lock_helpers():
+    module_path = Path(__file__).resolve().parents[1] / "state" / "file_lock.py"
+    spec = importlib.util.spec_from_file_location("davey_audit_file_lock", str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["davey_audit_file_lock"] = module
+    spec.loader.exec_module(module)
+    return module.LOCK_EX, module.locked_open
+
+
+LOCK_EX, locked_open = _load_file_lock_helpers()
 
 
 def _utc_now_iso() -> str:
@@ -95,7 +111,7 @@ class AuditArtifactWriter:
         payload = self._envelope(artifact_kind, created_at=created_at)
         payload.update(dict(body))
         path = self.artifact_dir / clean_filename
-        with path.open("a", encoding="utf-8") as handle:
+        with locked_open(path, "a", lock=LOCK_EX) as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         return path
 

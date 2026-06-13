@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+import importlib.util
 import json
 from pathlib import Path
+import sys
 from typing import Any, Iterable
 
 from contracts.overnight_scaffold import (
@@ -17,6 +19,20 @@ from contracts.overnight_scaffold import (
     NeedsHumanEvent,
     PokeBridgeHandoff,
 )
+
+
+def _load_file_lock_helpers():
+    module_path = Path(__file__).resolve().parent / "state" / "file_lock.py"
+    spec = importlib.util.spec_from_file_location("davey_overnight_file_lock", str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["davey_overnight_file_lock"] = module
+    spec.loader.exec_module(module)
+    return module.LOCK_EX, module.locked_open
+
+
+LOCK_EX, locked_open = _load_file_lock_helpers()
 
 
 def _utc_now_iso() -> str:
@@ -47,7 +63,7 @@ class OvernightArtifactWriter:
 
     def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
         line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        with path.open("a", encoding="utf-8") as handle:
+        with locked_open(path, "a", lock=LOCK_EX) as handle:
             handle.write(line + "\n")
 
     def write_candidate(self, event: CandidateEvent) -> None:

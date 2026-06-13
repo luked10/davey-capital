@@ -77,6 +77,10 @@ def main() -> None:
             }
         ]
         assert service.get_pending_candidates() == [], "seen handoffs should not repeat"
+        restarted_service = server.PokeBridgeService(repo_root=root)
+        assert (
+            restarted_service.get_pending_candidates() == []
+        ), "persistent seen ids should survive service restart"
 
         result = service.submit_triage_decision(
             handoff_id="handoff-0001",
