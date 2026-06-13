@@ -130,6 +130,7 @@ def main() -> None:
 
     old_enabled = os.environ.pop("DAVEY_SCHEDULER_ENABLED", None)
     old_root = os.environ.get("DAVEY_ROOT")
+    old_live_mode = os.environ.pop("DAVEY_LIVE_MODE", None)
     try:
         assert runtime.scheduler_enabled_from_env() is False
         assert runtime.SCHEDULER_INTERVAL_SECONDS == 300
@@ -185,6 +186,8 @@ def main() -> None:
             assert runtime_state_path == Path(tmp).resolve() / "runtime_state.json"
             runtime_state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
             assert runtime_state["circuit_breaker_status"] == "normal"
+            assert runtime_state["live_mode"] is False
+            assert runtime_state["dry_run"] is True
             assert runtime_state["last_report_at"]
             report_result = initial[1]["result"]
             assert report_result["ok"] is True
@@ -199,6 +202,18 @@ def main() -> None:
                 / "poke_bridge_queue.jsonl"
             )
             assert queue_path.exists()
+
+            os.environ["DAVEY_LIVE_MODE"] = "1"
+            live_cycle = runtime.run_watcher_cycle(
+                session_id="scheduler-live-smoke",
+                repo_root=tmp,
+                fetcher=lambda: [],
+            )
+            assert live_cycle["fetch_error"] == ""
+            live_state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
+            assert live_state["active_broker"] == "alpaca"
+            assert live_state["dry_run"] is False
+            assert live_state["live_mode"] is True
     finally:
         if old_enabled is None:
             os.environ.pop("DAVEY_SCHEDULER_ENABLED", None)
@@ -208,6 +223,10 @@ def main() -> None:
             os.environ.pop("DAVEY_ROOT", None)
         else:
             os.environ["DAVEY_ROOT"] = old_root
+        if old_live_mode is None:
+            os.environ.pop("DAVEY_LIVE_MODE", None)
+        else:
+            os.environ["DAVEY_LIVE_MODE"] = old_live_mode
 
     print("engine scheduler step5 smoke: ok")
 

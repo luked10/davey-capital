@@ -50,7 +50,14 @@ def main() -> None:
 
         assert service.get_pending_candidates() == []
 
-        queue_path = root / "logs" / "overnight" / "smoke-session" / "poke_bridge_queue.jsonl"
+        queue_path = (
+            root
+            / "logs"
+            / "overnight"
+            / "nested"
+            / "smoke-session"
+            / "poke_bridge_queue.jsonl"
+        )
         _write_jsonl(
             queue_path,
             [
@@ -170,6 +177,21 @@ def main() -> None:
         assert status["dry_run"] is True
         assert status["live_mode"] is False
         assert status["last_error"] == ""
+
+        previous_live_status = os.environ.get("DAVEY_LIVE_MODE")
+        os.environ["DAVEY_LIVE_MODE"] = "1"
+        try:
+            live_status = service.get_system_status()
+        finally:
+            if previous_live_status is None:
+                os.environ.pop("DAVEY_LIVE_MODE", None)
+            else:
+                os.environ["DAVEY_LIVE_MODE"] = previous_live_status
+        assert live_status["active_broker"] == "alpaca"
+        assert live_status["dry_run"] is False
+        assert live_status["live_mode"] is True
+        persisted_status = json.loads((root / "runtime_state.json").read_text(encoding="utf-8"))
+        assert persisted_status["live_mode"] is True
 
         today = datetime.now(timezone.utc).date().isoformat()
         daily_root = root / "daily-report-root"

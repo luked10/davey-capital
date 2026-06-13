@@ -208,10 +208,9 @@ def _circuit_breaker_payload(result: Any, *, config_error: str = "") -> dict[str
 
 def _runtime_state_with_env(state: Any) -> Any:
     live_mode = _live_mode_enabled()
-    if live_mode:
-        state.live_mode = True
-        state.dry_run = False
-        state.active_broker = "alpaca"
+    state.live_mode = live_mode
+    state.dry_run = not live_mode
+    state.active_broker = "alpaca" if live_mode else "paper"
     return state
 
 
@@ -284,7 +283,7 @@ class PokeBridgeService:
         if not self.overnight_root.exists():
             return []
         try:
-            return sorted(self.overnight_root.glob("*/poke_bridge_queue.jsonl"))
+            return sorted(self.overnight_root.rglob("poke_bridge_queue.jsonl"))
         except OSError:
             return []
 
@@ -732,6 +731,13 @@ class PokeBridgeService:
         result = load_runtime_state(self.repo_root / "runtime_state.json")
         if not result.ok or result.state is None:
             state = _runtime_state_with_env(default_runtime_state(updated_at=""))
+            try:
+                runtime_state_module.save_runtime_state(
+                    state,
+                    self.repo_root / "runtime_state.json",
+                )
+            except Exception:
+                pass
             missing_only = result.reasons == (
                 f"runtime state file not found: {self.repo_root / 'runtime_state.json'}",
             )
@@ -743,6 +749,13 @@ class PokeBridgeService:
                 "last_error": "" if missing_only else "; ".join(result.reasons),
             }
         state = _runtime_state_with_env(result.state)
+        try:
+            runtime_state_module.save_runtime_state(
+                state,
+                self.repo_root / "runtime_state.json",
+            )
+        except Exception:
+            pass
         return {
             "active_broker": state.active_broker,
             "dry_run": state.dry_run,
@@ -781,9 +794,15 @@ def _scheduler_enabled() -> bool:
 
 def _run_scheduler_start() -> None:
     try:
-        runtime_scaffold_module.start()
+        print("scheduler background start requested", flush=True)
+        result = runtime_scaffold_module.start()
+        print(
+            "scheduler background start result: "
+            + json.dumps(result, sort_keys=True, default=str),
+            flush=True,
+        )
     except Exception as exc:
-        print(f"scheduler start failed safely: {exc}", file=sys.stderr)
+        print(f"scheduler start failed safely: {exc}", file=sys.stderr, flush=True)
 
 
 def start_scheduler_background() -> bool:
@@ -791,8 +810,10 @@ def start_scheduler_background() -> bool:
     global _SCHEDULER_THREAD
 
     if not _scheduler_enabled():
+        print("scheduler disabled: DAVEY_SCHEDULER_ENABLED is not 1", flush=True)
         return False
     if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+        print("scheduler already running", flush=True)
         return True
     _SCHEDULER_THREAD = Thread(
         target=_run_scheduler_start,
@@ -800,6 +821,7 @@ def start_scheduler_background() -> bool:
         daemon=True,
     )
     _SCHEDULER_THREAD.start()
+    print("scheduler background thread launched", flush=True)
     return True
 
 

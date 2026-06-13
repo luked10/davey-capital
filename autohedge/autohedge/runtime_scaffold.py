@@ -9,7 +9,8 @@ import json
 import os
 from pathlib import Path
 import sys
-from threading import Lock
+from threading import Event, Lock, Thread
+import time
 from typing import Any, Callable
 
 
@@ -263,6 +264,10 @@ def run_watcher_cycle(
         or "scheduler"
     )
     clean_run_id = run_id or f"scheduler-{_utc_now_compact()}"
+    print(
+        f"scheduler cycle start: run_id={clean_run_id} session_id={clean_session_id} root={root}",
+        flush=True,
+    )
     fetch_candidates = fetcher or _load_fetch_candidates()
     DeterministicTier0Watcher, OvernightArtifactWriter = _load_watcher_classes()
 
@@ -316,6 +321,12 @@ def run_watcher_cycle(
     result["artifact_dir"] = str(writer.artifact_dir)
     result["fetch_error"] = fetch_error
     result["runtime_state_path"] = runtime_state_path_written
+    print(
+        "scheduler cycle complete: "
+        f"run_id={clean_run_id} candidates={len(payloads)} "
+        f"runtime_state_path={runtime_state_path_written} error={fetch_error!r}",
+        flush=True,
+    )
     return result
 
 
@@ -357,6 +368,9 @@ def run_daily_report(
 
         result = load_runtime_state(runtime_state_path(root))
         state = result.state if result.ok and result.state is not None else default_runtime_state()
+        state.live_mode = live_mode_enabled_from_env()
+        state.dry_run = not state.live_mode
+        state.active_broker = "alpaca" if state.live_mode else "paper"
         state.last_report_at = last_report_at
         if error:
             state.last_error = error
@@ -551,6 +565,8 @@ class LocalSchedulerScaffold:
         self._jobs: dict[str, tuple[SchedulerJob, JobCallable]] = {}
         self._backend = "stdlib"
         self._scheduler = None
+        self._stop_event = Event()
+        self._thread: Thread | None = None
         if prefer_apscheduler:
             try:
                 from apscheduler.schedulers.background import BackgroundScheduler
@@ -654,7 +670,9 @@ class LocalSchedulerScaffold:
     def run_pending_once(self) -> list[dict[str, Any]]:
         executed: list[dict[str, Any]] = []
         for job, func in self._jobs.values():
+            print(f"scheduler job start: job_id={job.job_id}", flush=True)
             result = func()
+            print(f"scheduler job complete: job_id={job.job_id}", flush=True)
             executed.append(
                 {
                     "job_id": job.job_id,
@@ -664,6 +682,31 @@ class LocalSchedulerScaffold:
             )
         return executed
 
+    def _run_stdlib_loop(self) -> None:
+        next_run_by_job: dict[str, float] = {}
+        now = time.monotonic()
+        for job, _ in self._jobs.values():
+            next_run_by_job[job.job_id] = now + job.interval_seconds
+
+        while not self._stop_event.wait(1.0):
+            now = time.monotonic()
+            for job, func in list(self._jobs.values()):
+                next_run = next_run_by_job.get(job.job_id, now)
+                if now < next_run:
+                    continue
+                try:
+                    print(f"scheduler job start: job_id={job.job_id}", flush=True)
+                    func()
+                    print(f"scheduler job complete: job_id={job.job_id}", flush=True)
+                except Exception as exc:
+                    print(
+                        f"scheduler job failed safely: job_id={job.job_id} error={exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                finally:
+                    next_run_by_job[job.job_id] = now + job.interval_seconds
+
     def start(self) -> bool:
         if not self.enabled:
             return False
@@ -671,12 +714,24 @@ class LocalSchedulerScaffold:
             return True
         if self._scheduler is not None:
             self._scheduler.start()
+        else:
+            self._stop_event.clear()
+            self._thread = Thread(
+                target=self._run_stdlib_loop,
+                name="davey-stdlib-scheduler",
+                daemon=True,
+            )
+            self._thread.start()
         self._running = True
         return True
 
     def stop(self) -> None:
         if self._scheduler is not None and self._running:
             self._scheduler.shutdown(wait=False)
+        if self._thread is not None and self._thread.is_alive():
+            self._stop_event.set()
+            self._thread.join(timeout=2)
+        self._thread = None
         self._running = False
 
 
