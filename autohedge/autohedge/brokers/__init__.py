@@ -11,6 +11,7 @@ from autohedge.brokers.base_agent import (
     BrokerPositionBoi,
 )
 from autohedge.brokers.alpaca_agent import AlpacaBrokerAgent, AlpacaBrokerBoi
+from autohedge.brokers.alpaca_live import AlpacaLiveBroker
 from autohedge.brokers.factory_agent import BROKER_AGENT_REGISTRY, get_broker_agent
 from autohedge.brokers.paper_agent import (
     PaperBrokerAgent,
@@ -34,6 +35,7 @@ __all__ = [
     'AccountSnapshotBoi',
     'AlpacaBrokerAgent',
     'AlpacaBrokerBoi',
+    'AlpacaLiveBroker',
     'BrokerAgent',
     'BrokerBoi',
     'BrokerFillAgent',

@@ -95,6 +95,21 @@ def main() -> None:
         assert len(runs) == 1
         assert runs[0]["network_enabled"] is False
 
+        bad_handoff = overnight_module.PokeBridgeHandoff(
+            handoff_id="bad-handoff",
+            run_id="smoke-run",
+            created_at="2026-06-13T00:00:00Z",
+            candidate_event_id="bad-candidate",
+            dry_run=True,
+            metadata={"symbol": "AAPL", "side": "hold", "confidence": 0.5},
+        )
+        assert writer.enqueue_poke_handoff(bad_handoff) == ""
+        needs_human = _read_jsonl(writer.needs_human_path)
+        poke = _read_jsonl(writer.poke_queue_path)
+        assert len(needs_human) == 2
+        assert needs_human[-1]["reason_code"] == "POKE_HANDOFF_VALIDATION_ERROR"
+        assert len(poke) == 1, "invalid handoff must not enter poke queue"
+
     print("watcher scaffold smoke: ok")
 
 

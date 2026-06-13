@@ -138,6 +138,12 @@ def main() -> None:
             prefer_apscheduler=False,
         )
         assert disabled_scheduler.enabled is False
+        disabled_jobs = disabled_scheduler.snapshot_jobs()
+        assert len(disabled_jobs) == 2
+        assert disabled_jobs[1].job_id == runtime.DAILY_REPORT_JOB_ID
+        assert disabled_jobs[1].schedule == "daily_utc"
+        assert disabled_jobs[1].utc_hour == 21
+        assert disabled_jobs[1].utc_minute == 0
         assert disabled_scheduler.start() is False
 
         with tempfile.TemporaryDirectory(prefix="scheduler-start-smoke-") as tmp:
@@ -164,8 +170,12 @@ def main() -> None:
             assert start_result["started"] is True
             assert start_result["backend"] == "stdlib"
             assert start_result["jobs"][0]["interval_seconds"] == 300
+            assert start_result["jobs"][1]["job_id"] == runtime.DAILY_REPORT_JOB_ID
+            assert start_result["jobs"][1]["schedule"] == "daily_utc"
+            assert start_result["jobs"][1]["utc_hour"] == 21
+            assert start_result["jobs"][1]["utc_minute"] == 0
             initial = start_result["initial_result"]
-            assert len(initial) == 1
+            assert len(initial) == 2
             cycle_result = initial[0]["result"]
             assert cycle_result["candidate_count"] == 1
             assert cycle_result["summary"]["processed"] == 1
@@ -175,6 +185,12 @@ def main() -> None:
             assert runtime_state_path == Path(tmp).resolve() / "runtime_state.json"
             runtime_state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
             assert runtime_state["circuit_breaker_status"] == "normal"
+            assert runtime_state["last_report_at"]
+            report_result = initial[1]["result"]
+            assert report_result["ok"] is True
+            report_path = Path(report_result["report_path"])
+            assert report_path == Path(tmp).resolve() / "reports" / f"daily_{report_result['report_date']}.md"
+            assert "Today:" in report_path.read_text(encoding="utf-8")
             queue_path = (
                 Path(tmp)
                 / "logs"

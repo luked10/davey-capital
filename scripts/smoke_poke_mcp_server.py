@@ -7,8 +7,10 @@ the local queue reader and proceed=False triage logging path with temp files.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = REPO_ROOT / "mcp_server" / "server.py"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from contracts.bridge_contract import ExecutionIntent
 
 
 def _load_server_module():
@@ -66,7 +70,7 @@ def main() -> None:
             ],
         )
 
-        pending = service.get_pending_candidates()
+        pending = [candidate.model_dump() for candidate in service.get_pending_candidates()]
         assert pending == [
             {
                 "handoff_id": "handoff-0001",
@@ -74,9 +78,27 @@ def main() -> None:
                 "side": "buy",
                 "confidence": 0.85,
                 "created_at": "2026-06-12T00:00:00Z",
+                "dry_run": True,
+                "metadata": {
+                    "symbol": "NVDA",
+                    "side": "buy",
+                    "confidence": 0.85,
+                    "session_id": "smoke-session",
+                    "run_id": "run-0001",
+                    "candidate_event_id": "candidate-0001",
+                },
             }
         ]
         assert service.get_pending_candidates() == [], "seen handoffs should not repeat"
+
+        validation_error = service.submit_triage_decision(
+            handoff_id="handoff-0001",
+            proceed="false",  # type: ignore[arg-type]
+            reason="bad bool",
+        )
+        assert validation_error["needs_human"] is True
+        assert validation_error["status"] == "validation_error"
+        assert "proceed" in validation_error["error"]
 
         result = service.submit_triage_decision(
             handoff_id="handoff-0001",
@@ -149,10 +171,94 @@ def main() -> None:
         assert status["live_mode"] is False
         assert status["last_error"] == ""
 
+        today = datetime.now(timezone.utc).date().isoformat()
+        daily_root = root / "daily-report-root"
+        daily_service = server.PokeBridgeService(repo_root=daily_root)
+        _write_jsonl(
+            daily_root / "logs" / "overnight" / "today-session" / "candidate_events.jsonl",
+            [
+                {
+                    "event_id": "candidate-today-0001",
+                    "run_id": "run-today",
+                    "created_at": f"{today}T13:30:00Z",
+                    "symbol": "NVDA",
+                    "side": "buy",
+                    "confidence": 0.88,
+                    "strategy": "smoke",
+                    "dry_run": True,
+                }
+            ],
+        )
+        daily_report = daily_service.get_daily_report()
+        assert "Today: 1 candidate, 0 proposals, 0 approved, 0 rejected, 0 blocks" in daily_report
+        assert "candidate-today-0001" in daily_report
+
+        _write_jsonl(
+            queue_path,
+            [
+                {
+                    "handoff_id": "handoff-0003",
+                    "run_id": "run-0003",
+                    "created_at": "2026-06-12T00:02:00Z",
+                    "candidate_event_id": "candidate-0003",
+                    "destination": "poke_bridge_local_queue",
+                    "dry_run": True,
+                    "metadata": {
+                        "symbol": "NVDA",
+                        "side": "buy",
+                        "confidence": 0.91,
+                    },
+                }
+            ],
+        )
+        previous_live_mode = os.environ.pop("DAVEY_LIVE_MODE", None)
+        try:
+            service.proposals_by_handoff["handoff-0003"] = {
+                "intent": ExecutionIntent(
+                    intent_id="intent-live-forced-dry-run",
+                    signal_id="candidate-0003",
+                    broker="alpaca",
+                    symbol="NVDA",
+                    side="buy",
+                    quantity=1.0,
+                    created_at="2026-06-12T00:02:01Z",
+                    dry_run=False,
+                    approved=False,
+                    metadata={"estimated_price": 100.0},
+                ),
+                "session_id": "smoke-session",
+                "candidate": {},
+                "proposal": {},
+            }
+            approval = service.record_approval_decision(
+                handoff_id="handoff-0003",
+                approved=True,
+                approved_by="smoke-test",
+            )
+        finally:
+            if previous_live_mode is not None:
+                os.environ["DAVEY_LIVE_MODE"] = previous_live_mode
+        assert "dry-run approved intent artifact" in approval
+        forced_path = (
+            root
+            / "logs"
+            / "audit"
+            / "smoke-session"
+            / "decision-live-mode-forced-dry-run-handoff-0003.json"
+        )
+        assert forced_path.exists()
+        intent_path = (
+            root
+            / "logs"
+            / "audit"
+            / "smoke-session"
+            / "intent-intent-live-forced-dry-run.json"
+        )
+        intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+        assert intent_payload["intent"]["dry_run"] is True
+
     source = SERVER_PATH.read_text(encoding="utf-8")
-    assert "execution_intent_to_broker_order" not in source
     assert "from autohedge.brokers" not in source
-    assert "submit_order" not in source
     assert "place_order" not in source
 
     print("poke mcp server smoke: ok")

@@ -48,8 +48,9 @@ class AlpacaBrokerAgent(BrokerAgent):
             default="https://paper-api.alpaca.markets",
         )
 
-        # Never place live orders in this scaffold.
-        self.live_enabled = False
+        # Live execution stays fail-closed unless a reviewed wrapper supplies an
+        # explicit executor callback and enables it in config.
+        self.live_enabled = self._read_bool("ALPACA_LIVE_ENABLED", default=False)
 
     def _read_setting(self, key: str, *, default: str = "") -> str:
         if self.config:
@@ -137,6 +138,24 @@ class AlpacaBrokerAgent(BrokerAgent):
             "live_call_made": False,
             "fill": fill,
         }
+
+    def execute(self, order: BrokerOrderAgent, *, live: bool = False) -> Any:
+        """Execute through the reviewed live wrapper, or fail closed.
+
+        ``place_order`` remains dry-run-only. Live-capable code must pass through
+        ``autohedge.brokers.alpaca_live`` which injects ``live_executor`` after
+        checking credentials, live-mode flags, and per-order limits.
+        """
+        if not live:
+            return self.place_order(order)
+        self.live_call_attempts += 1
+        executor = self.config.get("live_executor") if self.config else None
+        if not self.live_enabled or not callable(executor):
+            raise RuntimeError(
+                "Alpaca live execution is disabled unless alpaca_live supplies "
+                "an explicit live executor."
+            )
+        return executor(order)
 
     def place_execution_intent(self, intent: Any, risk: Any = None, run: Any = None) -> Any:
         # Local import avoids hard dependency cycles at module import time.

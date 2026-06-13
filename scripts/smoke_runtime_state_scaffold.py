@@ -55,6 +55,7 @@ def main() -> None:
             positions_summary={"open_positions": 2, "source": "repo-backed artifacts"},
             latest_signal_ids=["sig-0001", "sig-0002"],
             circuit_breaker_status="normal",
+            last_report_at="2026-06-10T20:59:00Z",
             last_error="",
             last_health_check="2026-06-10T00:00:00Z",
         )
@@ -67,6 +68,7 @@ def main() -> None:
         assert roundtrip.active_broker == "paper"
         assert roundtrip.dry_run is True and roundtrip.live_mode is False
         assert roundtrip.latest_signal_ids == ["sig-0001", "sig-0002"]
+        assert roundtrip.last_report_at == "2026-06-10T20:59:00Z"
         assert roundtrip.updated_at == "2026-06-10T00:00:01Z"
 
         # Missing file fails closed with NEEDS_HUMAN-style result.
@@ -99,15 +101,16 @@ def main() -> None:
         assert any("dry_run must be boolean" in r for r in wrong.reasons), wrong.reasons
         assert any("latest_signal_ids" in r for r in wrong.reasons), wrong.reasons
 
-        # live_mode=True requires human review even when structurally valid.
+        # live_mode=True is representable after the reviewed Alpaca promotion;
+        # execution itself is still gated elsewhere.
         live_path = Path(tmp) / "live.json"
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         payload["live_mode"] = True
         payload["dry_run"] = False
         live_path.write_text(json.dumps(payload), encoding="utf-8")
         live = load_runtime_state(live_path)
-        assert live.ok is False and live.needs_human is True
-        assert any("human review" in r for r in live.reasons), live.reasons
+        assert live.ok is True and live.needs_human is False, live.reasons
+        assert live.require_state().live_mode is True
 
         # Writing a malformed state fails closed.
         try:

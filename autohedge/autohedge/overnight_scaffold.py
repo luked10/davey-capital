@@ -10,8 +10,22 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 from typing import Any, Iterable
 
+from pydantic import ValidationError
+
+AUTOHEDGE_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+if str(AUTOHEDGE_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(AUTOHEDGE_PACKAGE_ROOT))
+
+try:
+    from autohedge.schemas.models import CandidateSignal
+except ModuleNotFoundError:
+    AUTOHEDGE_INNER_ROOT = Path(__file__).resolve().parent
+    if str(AUTOHEDGE_INNER_ROOT) not in sys.path:
+        sys.path.insert(0, str(AUTOHEDGE_INNER_ROOT))
+    from schemas.models import CandidateSignal
 from contracts.overnight_scaffold import (
     CandidateEvent,
     NeedsHumanEvent,
@@ -25,6 +39,25 @@ def _utc_now_iso() -> str:
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _candidate_signal_from_handoff(payload: dict[str, Any]) -> CandidateSignal:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return CandidateSignal.model_validate(
+        {
+            "handoff_id": payload.get("handoff_id", ""),
+            "symbol": metadata.get("symbol", ""),
+            "side": metadata.get("side", ""),
+            "confidence": metadata.get("confidence"),
+            "created_at": payload.get("created_at", ""),
+            "dry_run": payload.get("dry_run", True),
+            "metadata": {
+                **metadata,
+                "run_id": payload.get("run_id", ""),
+                "candidate_event_id": payload.get("candidate_event_id", ""),
+            },
+        }
+    )
 
 
 class OvernightArtifactWriter:
@@ -56,8 +89,28 @@ class OvernightArtifactWriter:
     def write_needs_human(self, event: NeedsHumanEvent) -> None:
         self._append_jsonl(self.needs_human_path, asdict(event))
 
-    def enqueue_poke_handoff(self, event: PokeBridgeHandoff) -> None:
-        self._append_jsonl(self.poke_queue_path, asdict(event))
+    def enqueue_poke_handoff(self, event: PokeBridgeHandoff) -> str:
+        payload = asdict(event)
+        try:
+            _candidate_signal_from_handoff(payload)
+        except ValidationError as exc:
+            needs_human_id = f"{_clean_text(event.handoff_id) or 'poke-handoff'}-schema-error"
+            self.write_needs_human(
+                NeedsHumanEvent(
+                    needs_human_id=needs_human_id,
+                    run_id=_clean_text(event.run_id) or "watcher-run",
+                    created_at=_utc_now_iso(),
+                    reason_code="POKE_HANDOFF_VALIDATION_ERROR",
+                    reason=str(exc),
+                    source_event_id=_clean_text(event.candidate_event_id),
+                    dry_run=event.dry_run if isinstance(event.dry_run, bool) else True,
+                    metadata={"payload": payload},
+                )
+            )
+            return ""
+
+        self._append_jsonl(self.poke_queue_path, payload)
+        return event.handoff_id
 
     def write_run_summary(self, payload: dict[str, Any]) -> None:
         self._append_jsonl(self.run_summary_path, payload)
@@ -179,8 +232,13 @@ class DeterministicTier0Watcher:
         handoff_id = ""
         if self.enable_poke_handoff:
             handoff = self._build_poke_handoff(event)
-            self.writer.enqueue_poke_handoff(handoff)
-            handoff_id = handoff.handoff_id
+            handoff_id = self.writer.enqueue_poke_handoff(handoff)
+            if not handoff_id:
+                return {
+                    "status": "needs_human",
+                    "event_id": event.event_id,
+                    "reason": "poke handoff validation failed",
+                }
 
         return {
             "status": "ok",

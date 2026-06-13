@@ -5,13 +5,13 @@ The server exposes the local watcher queue to Poke over MCP/SSE:
 - get_pending_candidates reads watcher PokeBridgeHandoff JSONL rows.
 - submit_triage_decision records Poke's proceed/reject decision and, when
   requested, asks the Sonnet proposal client for a dry-run ExecutionIntent.
-- record_approval_decision records Luke's final approval/rejection and writes an
-  approved dry-run intent artifact only. It never converts or executes orders.
+- record_approval_decision records Luke's final approval/rejection. Dry-run
+  approvals stay audit-only; explicitly non-dry-run approved intents may execute
+  only after live-mode, validation, and circuit-breaker gates pass.
 - get_system_status reads runtime_state.json.
 
-Safety boundary: this module never imports broker adapters, never creates
-broker order payloads, and never executes anything. All proposal intents pass
-through validate_execution_intent before being stored.
+Safety boundary: all proposal intents pass through validate_execution_intent
+before being stored or executed. Unapproved intents never execute.
 """
 
 from __future__ import annotations
@@ -26,8 +26,11 @@ import sys
 from threading import Thread
 from typing import Any
 
+from pydantic import ValidationError
+
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
+AUTOHEDGE_PACKAGE_ROOT = CODE_ROOT / "autohedge"
 
 
 def _default_davey_root() -> Path:
@@ -42,6 +45,8 @@ def _default_davey_root() -> Path:
 DAVEY_ROOT = _default_davey_root()
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
+if str(AUTOHEDGE_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(AUTOHEDGE_PACKAGE_ROOT))
 
 AUDIT_MODULE_PATH = CODE_ROOT / "autohedge" / "autohedge" / "audit" / "artifacts.py"
 RUNTIME_STATE_MODULE_PATH = (
@@ -53,11 +58,15 @@ SONNET_MODULE_PATH = (
 RUNTIME_SCAFFOLD_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "runtime_scaffold.py"
 )
+REPORT_MODULE_PATH = CODE_ROOT / "nova-alpha" / "report_scaffold.py"
 CIRCUIT_BREAKER_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "risk" / "circuit_breaker.py"
 )
 OBSERVATIONS_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "risk" / "observations.py"
+)
+ALPACA_LIVE_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "brokers" / "alpaca_live.py"
 )
 
 
@@ -78,11 +87,13 @@ runtime_scaffold_module = _load_module(
     "davey_mcp_runtime_scaffold",
     RUNTIME_SCAFFOLD_MODULE_PATH,
 )
+report_module = _load_module("davey_mcp_nova_alpha_report", REPORT_MODULE_PATH)
 circuit_breaker_module = _load_module(
     "davey_mcp_circuit_breaker",
     CIRCUIT_BREAKER_MODULE_PATH,
 )
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
+alpaca_live_module = _load_module("davey_mcp_alpaca_live", ALPACA_LIVE_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -91,13 +102,24 @@ SonnetProposalClient = sonnet_module.SonnetProposalClient
 CircuitBreakerConfig = circuit_breaker_module.CircuitBreakerConfig
 evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
+AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
 
-from contracts.bridge_contract import ExecutionIntent, validate_execution_intent
+from contracts.bridge_contract import (
+    ExecutionIntent,
+    FillRecord,
+    execution_intent_to_broker_order,
+    validate_execution_intent,
+)
 from contracts.overnight_scaffold import validate_poke_handoff_payload
+from autohedge.schemas.models import CandidateSignal, TriageDecision
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _live_mode_enabled() -> bool:
+    return os.getenv("DAVEY_LIVE_MODE", "").strip() == "1"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -184,26 +206,42 @@ def _circuit_breaker_payload(result: Any, *, config_error: str = "") -> dict[str
     }
 
 
-def _candidate_summary(row: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+def _runtime_state_with_env(state: Any) -> Any:
+    live_mode = _live_mode_enabled()
+    if live_mode:
+        state.live_mode = True
+        state.dry_run = False
+        state.active_broker = "alpaca"
+    return state
+
+
+def _candidate_signal(row: dict[str, Any], *, session_id: str) -> CandidateSignal:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    return {
-        "handoff_id": row.get("handoff_id", ""),
-        "symbol": metadata.get("symbol", ""),
-        "side": metadata.get("side", ""),
-        "confidence": metadata.get("confidence"),
-        "created_at": row.get("created_at", ""),
-        "session_id": session_id,
-        "candidate_event_id": row.get("candidate_event_id", ""),
-    }
+    return CandidateSignal.model_validate(
+        {
+            "handoff_id": row.get("handoff_id", ""),
+            "symbol": metadata.get("symbol", ""),
+            "side": metadata.get("side", ""),
+            "confidence": metadata.get("confidence"),
+            "created_at": row.get("created_at", ""),
+            "dry_run": row.get("dry_run", True),
+            "metadata": {
+                **metadata,
+                "session_id": session_id,
+                "run_id": row.get("run_id", ""),
+                "candidate_event_id": row.get("candidate_event_id", ""),
+            },
+        }
+    )
 
 
-def _public_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+def _validation_error_payload(*, handoff_id: str, error: ValidationError) -> dict[str, Any]:
     return {
-        "handoff_id": candidate["handoff_id"],
-        "symbol": candidate["symbol"],
-        "side": candidate["side"],
-        "confidence": candidate["confidence"],
-        "created_at": candidate["created_at"],
+        "handoff_id": handoff_id,
+        "status": "validation_error",
+        "needs_human": True,
+        "error": str(error),
+        "message": f"Validation failed for {handoff_id}: {error}",
     }
 
 
@@ -261,8 +299,8 @@ class PokeBridgeService:
                     return validation.normalized, session_id
         return None
 
-    def get_pending_candidates(self) -> list[dict[str, Any]]:
-        pending: list[dict[str, Any]] = []
+    def get_pending_candidates(self) -> list[CandidateSignal]:
+        pending: list[CandidateSignal] = []
         for path in self._queue_paths():
             session_id = path.parent.name
             for row in _read_jsonl(path):
@@ -273,11 +311,10 @@ class PokeBridgeService:
                 handoff_id = normalized["handoff_id"]
                 if handoff_id in self.seen_ids:
                     continue
-                pending.append(
-                    _public_candidate(
-                        _candidate_summary(normalized, session_id=session_id)
-                    )
-                )
+                try:
+                    pending.append(_candidate_signal(normalized, session_id=session_id))
+                except ValidationError:
+                    continue
                 self.seen_ids.add(handoff_id)
         return pending
 
@@ -286,14 +323,30 @@ class PokeBridgeService:
         handoff_id: str,
         proceed: bool,
         reason: str,
+        decided_at: str | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(proceed, bool):
-            raise ValueError("proceed must be boolean")
+        try:
+            decision = TriageDecision.model_validate(
+                {
+                    "handoff_id": handoff_id,
+                    "proceed": proceed,
+                    "reason": reason,
+                    "decided_at": decided_at or _utc_now_iso(),
+                }
+            )
+        except ValidationError as exc:
+            return _validation_error_payload(handoff_id=str(handoff_id or ""), error=exc)
+
+        handoff_id = decision.handoff_id
         found = self._find_handoff(handoff_id)
         if found is None:
             raise ValueError(f"handoff_id not found or invalid: {handoff_id}")
         handoff, session_id = found
-        candidate = _candidate_summary(handoff, session_id=session_id)
+        try:
+            candidate = _candidate_signal(handoff, session_id=session_id).model_dump()
+        except ValidationError as exc:
+            return _validation_error_payload(handoff_id=decision.handoff_id, error=exc)
+
         writer = AuditArtifactWriter(
             session_id=session_id,
             artifact_root=self.audit_root,
@@ -302,7 +355,7 @@ class PokeBridgeService:
         )
 
         proposal_payload: dict[str, Any] = {}
-        if proceed:
+        if decision.proceed:
             observations = build_observations(candidate["symbol"])
             cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
             cb_result = evaluate_circuit_breaker(cb_config, observations)
@@ -342,8 +395,8 @@ class PokeBridgeService:
                 }
                 writer.append_triage_decision(
                     handoff_id=handoff_id,
-                    proceed=proceed,
-                    reason=reason,
+                    proceed=decision.proceed,
+                    reason=decision.reason,
                     candidate=candidate,
                     proposal=proposal_payload,
                 )
@@ -432,18 +485,18 @@ class PokeBridgeService:
 
         writer.append_triage_decision(
             handoff_id=handoff_id,
-            proceed=proceed,
-            reason=reason,
+            proceed=decision.proceed,
+            reason=decision.reason,
             candidate=candidate,
             proposal=proposal_payload,
         )
 
-        if not proceed:
+        if not decision.proceed:
             return {
                 "handoff_id": handoff_id,
                 "status": "rejected_by_triage",
                 "candidate": candidate,
-                "message": f"Triage rejected {handoff_id}: {reason}",
+                "message": f"Triage rejected {handoff_id}: {decision.reason}",
             }
 
         return {
@@ -455,6 +508,53 @@ class PokeBridgeService:
             "proposal": proposal_payload,
             "message": proposal_payload.get("proposal_text", ""),
         }
+
+    def _write_live_block(
+        self,
+        *,
+        writer: Any,
+        handoff_id: str,
+        approved_by: str,
+        intent_id: str,
+        reason_code: str,
+        reason: str,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        writer.write_needs_human_artifact(
+            needs_human_id=f"live-execution-{handoff_id}",
+            reason_code=reason_code,
+            reason=reason,
+            source_event_id=handoff_id,
+            context=dict(context or {}),
+        )
+        writer.append_approval_decision(
+            handoff_id=handoff_id,
+            approved=False,
+            approved_by=approved_by,
+            intent_id=intent_id,
+            reason=reason,
+        )
+        return f"Approval for {handoff_id} blocked: {reason}"
+
+    def _update_runtime_state_after_fill(self, fill: FillRecord) -> None:
+        result = load_runtime_state(self.repo_root / "runtime_state.json")
+        state = result.state if result.ok and result.state is not None else default_runtime_state()
+        state.active_broker = "alpaca"
+        state.dry_run = fill.dry_run
+        state.live_mode = _live_mode_enabled()
+        state.circuit_breaker_status = "normal"
+        state.positions_summary = {
+            "open_positions": 0,
+            "source": "alpaca fill artifact",
+            "latest_fill": audit_module.to_dict(fill),
+        }
+        state.latest_signal_ids = [fill.intent_id]
+        state.last_error = ""
+        state.last_health_check = _utc_now_iso()
+        runtime_state_module.save_runtime_state(
+            state,
+            self.repo_root / "runtime_state.json",
+        )
 
     def record_approval_decision(
         self,
@@ -491,13 +591,26 @@ class PokeBridgeService:
                 )
 
             proposed_intent = proposal["intent"]
+            live_mode = _live_mode_enabled()
             approved_intent = replace(
                 proposed_intent,
-                dry_run=True,
+                dry_run=proposed_intent.dry_run if live_mode else True,
                 approved=True,
                 approved_by=approved_by or "luke_poke",
                 approved_at=_utc_now_iso(),
             )
+            if proposed_intent.dry_run is False and not live_mode:
+                writer.write_decision_artifact(
+                    decision_id=f"live-mode-forced-dry-run-{handoff_id}",
+                    decision="forced_dry_run",
+                    rationale="DAVEY_LIVE_MODE is not 1; approval recorded as dry-run only",
+                    source="poke_mcp_live_gate",
+                    context={
+                        "handoff_id": handoff_id,
+                        "intent_id": proposed_intent.intent_id,
+                    },
+                )
+
             validation = validate_execution_intent(approved_intent)
             if not validation.allowed or validation.normalized_intent is None:
                 writer.append_approval_decision(
@@ -513,7 +626,8 @@ class PokeBridgeService:
                     + "; ".join(validation.reasons)
                 )
 
-            write_result = writer.write_intent_artifact(validation.normalized_intent)
+            normalized_intent = validation.normalized_intent
+            write_result = writer.write_intent_artifact(normalized_intent)
             if not write_result.ok:
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
@@ -526,7 +640,79 @@ class PokeBridgeService:
                 return (
                     f"Approval for {handoff_id} blocked: intent artifact write failed."
                 )
-            intent_id = validation.normalized_intent.intent_id
+            intent_id = normalized_intent.intent_id
+
+            if normalized_intent.dry_run is False:
+                observations = build_observations(normalized_intent.symbol)
+                cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
+                cb_result = evaluate_circuit_breaker(cb_config, observations)
+                cb_payload = _circuit_breaker_payload(
+                    cb_result,
+                    config_error=cb_config_error,
+                )
+                writer.write_decision_artifact(
+                    decision_id=f"approval-circuit-breaker-{handoff_id}",
+                    decision="blocked" if cb_result.blocked else "normal",
+                    rationale=cb_result.reason,
+                    source="circuit_breaker",
+                    context={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent_id,
+                        "circuit_breaker": cb_payload,
+                    },
+                )
+                if cb_result.blocked:
+                    return self._write_live_block(
+                        writer=writer,
+                        handoff_id=handoff_id,
+                        approved_by=approved_by,
+                        intent_id=intent_id,
+                        reason_code="CIRCUIT_BREAKER_BLOCKED",
+                        reason="circuit breaker blocked live execution: "
+                        + cb_result.reason,
+                        context={"circuit_breaker": cb_payload},
+                    )
+
+                try:
+                    order_payload = execution_intent_to_broker_order(normalized_intent)
+                except Exception as exc:
+                    return self._write_live_block(
+                        writer=writer,
+                        handoff_id=handoff_id,
+                        approved_by=approved_by,
+                        intent_id=intent_id,
+                        reason_code="BROKER_ORDER_CONVERSION_FAILED",
+                        reason=f"broker order conversion failed: {exc}",
+                    )
+
+                try:
+                    fill = AlpacaLiveBroker(
+                        session_id=session_id,
+                        artifact_root=self.audit_root,
+                    ).submit_order(normalized_intent)
+                except Exception as exc:
+                    return self._write_live_block(
+                        writer=writer,
+                        handoff_id=handoff_id,
+                        approved_by=approved_by,
+                        intent_id=intent_id,
+                        reason_code="ALPACA_EXECUTION_BLOCKED",
+                        reason=str(exc),
+                        context={"order": order_payload},
+                    )
+
+                self._update_runtime_state_after_fill(fill)
+                writer.append_approval_decision(
+                    handoff_id=handoff_id,
+                    approved=True,
+                    approved_by=approved_by,
+                    intent_id=intent_id,
+                    reason="approved and submitted to Alpaca",
+                )
+                return (
+                    f"Approved {handoff_id}; submitted Alpaca order "
+                    f"{fill.order_id} with status {fill.status}."
+                )
 
         writer.append_approval_decision(
             handoff_id=handoff_id,
@@ -545,7 +731,7 @@ class PokeBridgeService:
     def get_system_status(self) -> dict[str, Any]:
         result = load_runtime_state(self.repo_root / "runtime_state.json")
         if not result.ok or result.state is None:
-            state = default_runtime_state(updated_at="")
+            state = _runtime_state_with_env(default_runtime_state(updated_at=""))
             missing_only = result.reasons == (
                 f"runtime state file not found: {self.repo_root / 'runtime_state.json'}",
             )
@@ -556,7 +742,7 @@ class PokeBridgeService:
                 "circuit_breaker_status": state.circuit_breaker_status,
                 "last_error": "" if missing_only else "; ".join(result.reasons),
             }
-        state = result.state
+        state = _runtime_state_with_env(result.state)
         return {
             "active_broker": state.active_broker,
             "dry_run": state.dry_run,
@@ -564,6 +750,25 @@ class PokeBridgeService:
             "circuit_breaker_status": state.circuit_breaker_status,
             "last_error": state.last_error,
         }
+
+    def get_daily_report(self) -> str:
+        """Return today's local nova-alpha report for Poke/SMS delivery."""
+        try:
+            report_date = datetime.now(timezone.utc).date().isoformat()
+            artifacts = report_module.load_local_artifacts(
+                self.repo_root,
+                today_only=True,
+                report_date=report_date,
+            )
+            if not report_module.has_report_activity(artifacts):
+                return "No activity today"
+            return report_module.render_daily_report(
+                artifacts,
+                report_date=report_date,
+                today_only=True,
+            )
+        except Exception as exc:
+            return f"Daily report unavailable: {exc}"
 
 
 SERVICE = PokeBridgeService()
@@ -598,7 +803,7 @@ def start_scheduler_background() -> bool:
     return True
 
 
-def get_pending_candidates() -> list[dict[str, Any]]:
+def get_pending_candidates() -> list[CandidateSignal]:
     return SERVICE.get_pending_candidates()
 
 
@@ -606,11 +811,13 @@ def submit_triage_decision(
     handoff_id: str,
     proceed: bool,
     reason: str,
+    decided_at: str | None = None,
 ) -> dict[str, Any]:
     return SERVICE.submit_triage_decision(
         handoff_id=handoff_id,
         proceed=proceed,
         reason=reason,
+        decided_at=decided_at,
     )
 
 
@@ -630,6 +837,10 @@ def get_system_status() -> dict[str, Any]:
     return SERVICE.get_system_status()
 
 
+def get_daily_report() -> str:
+    return SERVICE.get_daily_report()
+
+
 def build_mcp_app():
     """Build the MCP app lazily so offline imports do not require mcp."""
     try:
@@ -644,6 +855,7 @@ def build_mcp_app():
     app.tool()(submit_triage_decision)
     app.tool()(record_approval_decision)
     app.tool()(get_system_status)
+    app.tool()(get_daily_report)
     return app
 
 

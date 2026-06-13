@@ -1,12 +1,12 @@
-"""Repo-backed audit artifact writer (local-only, no live execution required).
+"""Repo-backed audit artifact writer.
 
 Writes decision / error / proposed-intent / fill-shape artifacts as JSON files
 under a repo-backed directory (logs/ or sessions/ in real use; tmp dirs in
 tests). File names are deterministic: ``{kind}-{artifact_id}.json``.
 
-This module performs NO broker calls and NO network access. Fill artifacts
-are shape-only: a fill payload that is not explicitly ``dry_run=True`` fails
-closed, so a real fill can never be recorded through this scaffold.
+This module performs NO broker calls and NO network access. Non-dry-run fill
+artifacts require an explicit caller opt-in so historical scaffold paths remain
+fail-closed by default.
 """
 
 from __future__ import annotations
@@ -306,9 +306,14 @@ class AuditArtifactWriter:
         self,
         fill: FillRecord,
         *,
+        allow_live_fill: bool = False,
         created_at: str | None = None,
     ) -> AuditWriteResult:
-        """Record a fake/local fill SHAPE only. Non-dry-run fills fail closed."""
+        """Record a fill artifact.
+
+        Dry-run fills are accepted by default. Real broker fills require
+        ``allow_live_fill=True`` from the reviewed execution path.
+        """
         if not isinstance(fill, FillRecord):
             return AuditWriteResult(
                 ok=False,
@@ -319,8 +324,10 @@ class AuditArtifactWriter:
             )
 
         reasons: list[str] = []
-        if fill.dry_run is not True:
-            reasons.append("fill artifacts are shape-only: fill.dry_run must be True (bool)")
+        if not isinstance(fill.dry_run, bool):
+            reasons.append("fill.dry_run must be boolean")
+        elif fill.dry_run is not True and allow_live_fill is not True:
+            reasons.append("non-dry-run fill artifacts require allow_live_fill=True")
         if not _clean_text(fill.intent_id):
             reasons.append("fill.intent_id must be non-empty")
         if not _clean_text(fill.symbol):
@@ -328,7 +335,12 @@ class AuditArtifactWriter:
         return self._write(
             artifact_kind="fill",
             artifact_id=fill.fill_id,
-            body={"fill": to_dict(fill), "fake_local_only": True},
+            body={
+                "dry_run": fill.dry_run,
+                "network_enabled": fill.dry_run is not True,
+                "fill": to_dict(fill),
+                "fake_local_only": fill.dry_run is True,
+            },
             reasons=reasons,
             created_at=created_at,
         )

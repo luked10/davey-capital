@@ -17,8 +17,12 @@ EngineFactory = Callable[[], Any]
 JobCallable = Callable[[], Any]
 SCHEDULER_INTERVAL_SECONDS = 5 * 60
 SCHEDULER_JOB_ID = "tier0-market-feed-watcher"
+DAILY_REPORT_JOB_ID = "nova-alpha-daily-report"
+DAILY_REPORT_UTC_HOUR = 21
+DAILY_REPORT_UTC_MINUTE = 0
 _ACTIVE_SCHEDULER: Any | None = None
 _RUNTIME_STATE_MODULE: Any | None = None
+_REPORT_MODULE: Any | None = None
 _CIRCUIT_BREAKER_MODULE: Any | None = None
 _OBSERVATIONS_MODULE: Any | None = None
 
@@ -29,6 +33,10 @@ def _utc_now_compact() -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _utc_today_date() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _repo_root() -> Path:
@@ -45,6 +53,11 @@ def scheduler_enabled_from_env() -> bool:
     return os.getenv("DAVEY_SCHEDULER_ENABLED", "").strip() == "1"
 
 
+def live_mode_enabled_from_env() -> bool:
+    """Execution-mode gate; still separate from real-money Alpaca trading."""
+    return os.getenv("DAVEY_LIVE_MODE", "").strip() == "1"
+
+
 def _load_local_module(name: str, relative_path: str):
     module_path = Path(__file__).resolve().parent / relative_path
     spec = importlib.util.spec_from_file_location(name, str(module_path))
@@ -53,6 +66,25 @@ def _load_local_module(name: str, relative_path: str):
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_nova_alpha_report_module():
+    global _REPORT_MODULE
+
+    if _REPORT_MODULE is not None:
+        return _REPORT_MODULE
+    module_path = Path(__file__).resolve().parents[2] / "nova-alpha" / "report_scaffold.py"
+    spec = importlib.util.spec_from_file_location(
+        "davey_runtime_nova_alpha_report",
+        str(module_path),
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["davey_runtime_nova_alpha_report"] = module
+    spec.loader.exec_module(module)
+    _REPORT_MODULE = module
     return module
 
 
@@ -258,6 +290,9 @@ def run_watcher_cycle(
     try:
         default_runtime_state = _load_runtime_state_helpers()
         state = default_runtime_state()
+        state.live_mode = live_mode_enabled_from_env()
+        state.dry_run = not state.live_mode
+        state.active_broker = "alpaca" if state.live_mode else "paper"
         state.circuit_breaker_status = _scheduler_circuit_breaker_status(
             root,
             status_symbol,
@@ -284,6 +319,67 @@ def run_watcher_cycle(
     return result
 
 
+def run_daily_report(
+    *,
+    repo_root: str | Path | None = None,
+    report_date: str | None = None,
+) -> dict[str, Any]:
+    """Render and persist the local daily report, then stamp runtime state."""
+    root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
+    clean_date = report_date or _utc_today_date()
+    report_module = _load_nova_alpha_report_module()
+    output_path = root / "reports" / f"daily_{clean_date}.md"
+    last_report_at = _utc_now_iso()
+    error = ""
+
+    try:
+        artifacts = report_module.load_local_artifacts(
+            root,
+            today_only=True,
+            report_date=clean_date,
+        )
+        report = report_module.render_daily_report(
+            artifacts,
+            report_date=clean_date,
+            today_only=True,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+    except Exception as exc:
+        error = str(exc)
+
+    runtime_state_path_written = ""
+    try:
+        runtime_state = _load_runtime_state_module()
+        load_runtime_state = runtime_state.load_runtime_state
+        default_runtime_state = runtime_state.default_runtime_state
+        save_runtime_state = runtime_state.save_runtime_state
+
+        result = load_runtime_state(runtime_state_path(root))
+        state = result.state if result.ok and result.state is not None else default_runtime_state()
+        state.last_report_at = last_report_at
+        if error:
+            state.last_error = error
+        runtime_state_path_written = str(
+            save_runtime_state(
+                state,
+                runtime_state_path(root),
+                updated_at=last_report_at,
+            )
+        )
+    except Exception as exc:
+        error = "; ".join(part for part in (error, str(exc)) if part)
+
+    return {
+        "ok": error == "",
+        "report_path": str(output_path) if output_path.exists() else "",
+        "report_date": clean_date,
+        "last_report_at": last_report_at,
+        "runtime_state_path": runtime_state_path_written,
+        "error": error,
+    }
+
+
 def build_scheduler(
     *,
     enabled: bool | None = None,
@@ -306,6 +402,13 @@ def build_scheduler(
         ),
         seconds=SCHEDULER_INTERVAL_SECONDS,
         metadata={"source": "yfinance_market_feed"},
+    )
+    scheduler.register_daily_utc_job(
+        DAILY_REPORT_JOB_ID,
+        lambda: run_daily_report(repo_root=repo_root),
+        hour=DAILY_REPORT_UTC_HOUR,
+        minute=DAILY_REPORT_UTC_MINUTE,
+        metadata={"source": "nova_alpha_report", "output": "reports/daily_{date}.md"},
     )
     return scheduler
 
@@ -427,6 +530,9 @@ class SchedulerJob:
     interval_seconds: float
     dry_run: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    schedule: str = "interval"
+    utc_hour: int | None = None
+    utc_minute: int | None = None
 
 
 class LocalSchedulerScaffold:
@@ -500,6 +606,48 @@ class LocalSchedulerScaffold:
             )
         return job
 
+    def register_daily_utc_job(
+        self,
+        job_id: str,
+        func: JobCallable,
+        *,
+        hour: int,
+        minute: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> SchedulerJob:
+        clean_job_id = str(job_id or "").strip()
+        if not clean_job_id:
+            raise ValueError("job_id must be non-empty")
+        if not callable(func):
+            raise ValueError("func must be callable")
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError("hour/minute must be a valid UTC time")
+
+        job = SchedulerJob(
+            job_id=clean_job_id,
+            interval_seconds=24 * 60 * 60,
+            dry_run=self.dry_run,
+            metadata=dict(metadata or {}),
+            schedule="daily_utc",
+            utc_hour=hour,
+            utc_minute=minute,
+        )
+        self._jobs[clean_job_id] = (job, func)
+
+        if self._scheduler is not None:
+            self._scheduler.add_job(
+                func=func,
+                trigger="cron",
+                hour=hour,
+                minute=minute,
+                timezone="UTC",
+                id=clean_job_id,
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+        return job
+
     def snapshot_jobs(self) -> list[SchedulerJob]:
         return [pair[0] for pair in self._jobs.values()]
 
@@ -566,6 +714,9 @@ def start(
             {
                 "job_id": job.job_id,
                 "interval_seconds": job.interval_seconds,
+                "schedule": job.schedule,
+                "utc_hour": job.utc_hour,
+                "utc_minute": job.utc_minute,
                 "dry_run": job.dry_run,
                 "metadata": job.metadata,
             }

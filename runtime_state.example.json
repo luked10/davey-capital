@@ -4,6 +4,7 @@
   "dry_run": true,
   "last_error": "",
   "last_health_check": "2026-06-10T00:00:00Z",
+  "last_report_at": "",
   "latest_signal_ids": [
     "example-signal-0001",
     "example-signal-0002"

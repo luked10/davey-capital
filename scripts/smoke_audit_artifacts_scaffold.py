@@ -2,7 +2,8 @@
 """Deterministic smoke for the audit artifact writer scaffold (Slice E).
 
 Writes only to a temporary directory. No broker calls, no network calls,
-no real fills, no credentials.
+no credentials. Non-dry-run fill recording is covered only through the explicit
+reviewed live-fill opt-in flag.
 """
 
 from __future__ import annotations
@@ -201,7 +202,7 @@ def main() -> None:
         assert payload["fake_local_only"] is True
         assert payload["fill"]["dry_run"] is True
 
-        # A non-dry-run fill must fail closed (no real fills through this scaffold).
+        # A non-dry-run fill fails closed unless the reviewed execution path opts in.
         real_fill = FillRecord(
             fill_id="fill-0002",
             intent_id="intent-0002",
@@ -215,8 +216,19 @@ def main() -> None:
         )
         blocked_fill = writer.write_fill_artifact(real_fill, created_at=CREATED_AT)
         assert blocked_fill.ok is False and blocked_fill.path is None
-        assert any("dry_run must be True" in r for r in blocked_fill.reasons)
+        assert any("allow_live_fill=True" in r for r in blocked_fill.reasons)
         assert not (writer.artifact_dir / "fill-fill-0002.json").exists()
+
+        live_fill = writer.write_fill_artifact(
+            real_fill,
+            allow_live_fill=True,
+            created_at=CREATED_AT,
+        )
+        assert live_fill.ok is True, live_fill.reasons
+        payload = _read_json(live_fill.path)
+        assert payload["dry_run"] is False
+        assert payload["network_enabled"] is True
+        assert payload["fake_local_only"] is False
 
         # String dry_run is never accepted.
         coerced_fill = FillRecord(

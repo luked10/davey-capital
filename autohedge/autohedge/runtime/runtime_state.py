@@ -27,6 +27,7 @@ RUNTIME_STATE_REQUIRED_KEYS = (
     "positions_summary",
     "latest_signal_ids",
     "circuit_breaker_status",
+    "last_report_at",
     "last_error",
     "last_health_check",
     "updated_at",
@@ -45,6 +46,7 @@ class RuntimeState:
     positions_summary: dict[str, Any] = field(default_factory=dict)
     latest_signal_ids: list[str] = field(default_factory=list)
     circuit_breaker_status: str = "disabled"
+    last_report_at: str = ""
     last_error: str = ""
     last_health_check: str = ""
     updated_at: str = ""
@@ -112,14 +114,9 @@ def _validate_state_payload(payload: Any, reasons: list[str]) -> RuntimeState | 
                 "circuit_breaker_status must be one of: normal, blocked, disabled"
             )
 
-    for key in ("last_error", "last_health_check", "updated_at"):
+    for key in ("last_report_at", "last_error", "last_health_check", "updated_at"):
         if key in payload and not isinstance(payload.get(key), str):
             reasons.append(f"{key} must be a string")
-
-    # Safety posture check: live_mode=True together with dry_run=True is
-    # contradictory; live_mode=True at all is a human-review condition here.
-    if isinstance(live_mode, bool) and live_mode is True:
-        reasons.append("live_mode=True requires human review (scaffold is local-only)")
 
     if reasons:
         return None
@@ -131,6 +128,7 @@ def _validate_state_payload(payload: Any, reasons: list[str]) -> RuntimeState | 
         positions_summary=dict(positions_summary),
         latest_signal_ids=list(latest_signal_ids),
         circuit_breaker_status=circuit_breaker_status,
+        last_report_at=payload["last_report_at"],
         last_error=payload["last_error"],
         last_health_check=payload["last_health_check"],
         updated_at=payload["updated_at"],

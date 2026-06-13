@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
+import tempfile
 import types
 from typing import Any, Callable
 
@@ -116,6 +118,7 @@ def main() -> None:
         "RobinhoodBrokerAgent",
         "SolanaBrokerAgent",
         "AlpacaBrokerAgent",
+        "AlpacaLiveBroker",
     ):
         assert agent_name in exported, f"Missing package export for {agent_name}"
 
@@ -264,6 +267,100 @@ def main() -> None:
         includes="unable to validate intent safely",
     )
     assert alpaca.live_call_attempts == 0
+
+    # H) Reviewed Alpaca live wrapper can submit through an injected fake
+    # submitter only after live-mode, approval, credentials, and $200 cap gates.
+    old_env = {
+        key: os.environ.get(key)
+        for key in (
+            "DAVEY_LIVE_MODE",
+            "ALPACA_API_KEY",
+            "ALPACA_SECRET_KEY",
+            "ALPACA_LIVE_TRADING",
+        )
+    }
+    try:
+        os.environ["DAVEY_LIVE_MODE"] = "1"
+        os.environ["ALPACA_API_KEY"] = "paper-key"
+        os.environ["ALPACA_SECRET_KEY"] = "paper-secret"
+        os.environ.pop("ALPACA_LIVE_TRADING", None)
+        submissions: list[dict[str, Any]] = []
+
+        def fake_submitter(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+            submissions.append({"url": url, "payload": payload, "headers": headers})
+            return {
+                "id": "paper-order-0001",
+                "status": "accepted",
+                "submitted_at": "2026-05-31T04:00:10Z",
+                "symbol": payload["symbol"],
+                "side": payload["side"],
+                "qty": payload["qty"],
+                "type": payload["type"],
+                "limit_price": payload.get("limit_price"),
+            }
+
+        with tempfile.TemporaryDirectory(prefix="alpaca-live-wrapper-") as tmp:
+            live_broker = init_mod.AlpacaLiveBroker(
+                session_id="smoke-live",
+                artifact_root=Path(tmp) / "logs" / "audit",
+                submitter=fake_submitter,
+            )
+            live_intent = ExecutionIntent(
+                intent_id="intent-step3-live-paper",
+                signal_id="sig-step3",
+                broker="alpaca",
+                symbol="NVDA",
+                side="buy",
+                quantity=1.0,
+                order_type="limit",
+                limit_price=100.0,
+                created_at="2026-05-31T04:00:09Z",
+                dry_run=False,
+                approved=True,
+                approved_by="smoke-test",
+                approved_at="2026-05-31T04:00:09Z",
+                metadata={"estimated_price": 100.0},
+            )
+            fill = live_broker.submit_order(live_intent)
+            assert fill.status == "accepted"
+            assert fill.dry_run is False
+            assert fill.metadata["paper_trading"] is True
+            assert submissions[0]["url"].startswith("https://paper-api.alpaca.markets")
+            fill_path = (
+                Path(tmp)
+                / "logs"
+                / "audit"
+                / "smoke-live"
+                / "fill-alpaca-paper-order-0001.json"
+            )
+            assert fill_path.exists()
+
+            too_large = ExecutionIntent(
+                intent_id="intent-step3-too-large",
+                signal_id="sig-step3",
+                broker="alpaca",
+                symbol="NVDA",
+                side="buy",
+                quantity=3.0,
+                order_type="limit",
+                limit_price=100.0,
+                created_at="2026-05-31T04:00:11Z",
+                dry_run=False,
+                approved=True,
+                approved_by="smoke-test",
+                approved_at="2026-05-31T04:00:11Z",
+            )
+            _expect_value_error(
+                lambda: live_broker.submit_order(too_large),
+                includes="exceeds hard $200 cap",
+            )
+            assert len(submissions) == 1
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     print("brokers step3 smoke: ok")
 
