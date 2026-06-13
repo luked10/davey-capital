@@ -68,6 +68,9 @@ OBSERVATIONS_MODULE_PATH = (
 ALPACA_LIVE_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "brokers" / "alpaca_live.py"
 )
+SEEN_IDS_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "seen_ids.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -94,6 +97,7 @@ circuit_breaker_module = _load_module(
 )
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
 alpaca_live_module = _load_module("davey_mcp_alpaca_live", ALPACA_LIVE_MODULE_PATH)
+seen_ids_module = _load_module("davey_mcp_seen_ids", SEEN_IDS_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -103,6 +107,7 @@ CircuitBreakerConfig = circuit_breaker_module.CircuitBreakerConfig
 evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
 AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
+SeenIdsStore = seen_ids_module.SeenIdsStore
 
 from contracts.bridge_contract import (
     ExecutionIntent,
@@ -268,7 +273,7 @@ class PokeBridgeService:
 
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
-        self.seen_ids: set[str] = set()
+        self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
 
     @property
@@ -308,13 +313,16 @@ class PokeBridgeService:
                     continue
                 normalized = validation.normalized
                 handoff_id = normalized["handoff_id"]
-                if handoff_id in self.seen_ids:
+                if self.seen_ids.is_seen(handoff_id):
+                    print(f"candidate already seen: {handoff_id}", flush=True)
                     continue
                 try:
-                    pending.append(_candidate_signal(normalized, session_id=session_id))
+                    candidate = _candidate_signal(normalized, session_id=session_id)
                 except ValidationError:
                     continue
-                self.seen_ids.add(handoff_id)
+                pending.append(candidate)
+                self.seen_ids.mark_seen(handoff_id)
+                print(f"new candidate found: {handoff_id}", flush=True)
         return pending
 
     def submit_triage_decision(
