@@ -80,6 +80,85 @@ class AuditArtifactWriter:
             "network_enabled": False,
         }
 
+    def _append_jsonl(
+        self,
+        *,
+        filename: str,
+        artifact_kind: str,
+        body: dict[str, Any],
+        created_at: str | None = None,
+    ) -> Path:
+        """Append one audit JSONL row under this writer's artifact directory."""
+        clean_filename = _clean_text(filename)
+        if not clean_filename.endswith(".jsonl") or "/" in clean_filename:
+            raise ValueError(f"filename must be a safe .jsonl basename, got {filename!r}")
+        payload = self._envelope(artifact_kind, created_at=created_at)
+        payload.update(dict(body))
+        path = self.artifact_dir / clean_filename
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        return path
+
+    def append_triage_decision(
+        self,
+        *,
+        handoff_id: str,
+        proceed: bool,
+        reason: str,
+        candidate: dict[str, Any] | None = None,
+        proposal: dict[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> Path:
+        if not isinstance(proceed, bool):
+            raise ValueError("proceed must be boolean")
+        clean_handoff_id = _clean_text(handoff_id)
+        clean_reason = _clean_text(reason)
+        if not clean_handoff_id:
+            raise ValueError("handoff_id must be non-empty")
+        if not clean_reason:
+            raise ValueError("reason must be non-empty")
+        return self._append_jsonl(
+            filename="triage_decisions.jsonl",
+            artifact_kind="triage_decision",
+            body={
+                "handoff_id": clean_handoff_id,
+                "proceed": proceed,
+                "reason": clean_reason,
+                "candidate": dict(candidate or {}),
+                "proposal": dict(proposal or {}),
+            },
+            created_at=created_at,
+        )
+
+    def append_approval_decision(
+        self,
+        *,
+        handoff_id: str,
+        approved: bool,
+        approved_by: str,
+        intent_id: str = "",
+        reason: str = "",
+        created_at: str | None = None,
+    ) -> Path:
+        if not isinstance(approved, bool):
+            raise ValueError("approved must be boolean")
+        clean_handoff_id = _clean_text(handoff_id)
+        clean_approved_by = _clean_text(approved_by) or "luke_poke"
+        if not clean_handoff_id:
+            raise ValueError("handoff_id must be non-empty")
+        return self._append_jsonl(
+            filename="approval_decisions.jsonl",
+            artifact_kind="approval_decision",
+            body={
+                "handoff_id": clean_handoff_id,
+                "approved": approved,
+                "approved_by": clean_approved_by,
+                "intent_id": _clean_text(intent_id),
+                "reason": _clean_text(reason),
+            },
+            created_at=created_at,
+        )
+
     def _write(
         self,
         *,
