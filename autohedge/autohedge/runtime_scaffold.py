@@ -374,6 +374,8 @@ def run_daily_report(
         state.last_report_at = last_report_at
         if error:
             state.last_error = error
+        else:
+            state.last_error = ""
         runtime_state_path_written = str(
             save_runtime_state(
                 state,
