@@ -21,6 +21,7 @@ class CircuitBreakerConfig:
     enabled: bool = False
     max_consecutive_losses: int = 3
     daily_loss_limit_pct: float | None = None
+    max_daily_loss_pct: float | None = None
     max_open_trades: int | None = None
 
 
@@ -31,6 +32,10 @@ class CircuitBreakerResult:
     reason: str
     triggered_rules: list[str] = field(default_factory=list)
     observed: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def blocked(self) -> bool:
+        return not self.allowed
 
 
 def _non_negative_int(value: Any) -> int | None:
@@ -60,6 +65,7 @@ def _finite_float(value: Any) -> float | None:
 
 def evaluate_circuit_breaker(
     config: CircuitBreakerConfig | None = None,
+    observations: dict[str, Any] | None = None,
     *,
     consecutive_losses: Any = 0,
     daily_loss_pct: Any = 0.0,
@@ -71,6 +77,19 @@ def evaluate_circuit_breaker(
     repo-backed artifacts). Malformed config or observations fail closed with
     needs_human=True. A disabled config always allows.
     """
+    if observations is not None:
+        if not isinstance(observations, dict):
+            return CircuitBreakerResult(
+                allowed=False,
+                needs_human=True,
+                reason="malformed observations: expected dict",
+                triggered_rules=["malformed_observations"],
+                observed={"observations": observations},
+            )
+        consecutive_losses = observations.get("consecutive_losses", consecutive_losses)
+        daily_loss_pct = observations.get("daily_loss_pct", daily_loss_pct)
+        open_trades = observations.get("open_trades", open_trades)
+
     observed = {
         "consecutive_losses": consecutive_losses,
         "daily_loss_pct": daily_loss_pct,
@@ -141,13 +160,18 @@ def evaluate_circuit_breaker(
             f"max_consecutive_losses: {losses} >= {max_losses}"
         )
 
-    if config.daily_loss_limit_pct is not None:
-        limit_pct = _finite_float(config.daily_loss_limit_pct)
+    daily_limit = (
+        config.max_daily_loss_pct
+        if config.max_daily_loss_pct is not None
+        else config.daily_loss_limit_pct
+    )
+    if daily_limit is not None:
+        limit_pct = _finite_float(daily_limit)
         if limit_pct is None or limit_pct < 0:
             return CircuitBreakerResult(
                 allowed=False,
                 needs_human=True,
-                reason="malformed config: daily_loss_limit_pct must be a non-negative number",
+                reason="malformed config: daily loss limit must be a non-negative number",
                 triggered_rules=["malformed_config"],
                 observed=observed,
             )

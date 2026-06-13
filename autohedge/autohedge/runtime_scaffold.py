@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -21,6 +22,10 @@ _ACTIVE_SCHEDULER: Any | None = None
 
 def _utc_now_compact() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _repo_root() -> Path:
@@ -79,6 +84,96 @@ def write_runtime_state(
         runtime_state_path(repo_root),
         updated_at=updated_at,
     )
+
+
+def _load_runtime_state_helpers():
+    try:
+        from autohedge.runtime.runtime_state import default_runtime_state
+    except Exception:
+        runtime_state = _load_local_module(
+            "davey_runtime_state_scaffold",
+            "runtime/runtime_state.py",
+        )
+        default_runtime_state = runtime_state.default_runtime_state
+    return default_runtime_state
+
+
+def _load_circuit_breaker_helpers():
+    try:
+        from autohedge.risk.circuit_breaker import (
+            CircuitBreakerConfig,
+            evaluate_circuit_breaker,
+        )
+        from autohedge.risk.observations import build_observations
+    except Exception:
+        circuit_breaker = _load_local_module(
+            "davey_runtime_circuit_breaker",
+            "risk/circuit_breaker.py",
+        )
+        observations = _load_local_module(
+            "davey_runtime_observations",
+            "risk/observations.py",
+        )
+        CircuitBreakerConfig = circuit_breaker.CircuitBreakerConfig
+        evaluate_circuit_breaker = circuit_breaker.evaluate_circuit_breaker
+        build_observations = observations.build_observations
+    return CircuitBreakerConfig, evaluate_circuit_breaker, build_observations
+
+
+def _load_circuit_breaker_config(repo_root: Path) -> Any:
+    CircuitBreakerConfig, _, _ = _load_circuit_breaker_helpers()
+    config_path = repo_root / "circuit_breaker_config.json"
+    if not config_path.exists():
+        return CircuitBreakerConfig(
+            enabled=True,
+            max_consecutive_losses=3,
+            max_daily_loss_pct=0.02,
+            max_open_trades=5,
+        )
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return CircuitBreakerConfig(enabled="malformed")  # type: ignore[arg-type]
+    if not isinstance(payload, dict):
+        return CircuitBreakerConfig(enabled="malformed")  # type: ignore[arg-type]
+    enabled = payload.get("enabled")
+    max_losses = payload.get("max_consecutive_losses")
+    max_daily_loss_pct = payload.get("max_daily_loss_pct")
+    max_open_trades = payload.get("max_open_trades")
+    if (
+        not isinstance(enabled, bool)
+        or isinstance(max_losses, bool)
+        or not isinstance(max_losses, int)
+        or max_losses < 0
+        or isinstance(max_daily_loss_pct, bool)
+        or not isinstance(max_daily_loss_pct, (int, float))
+        or float(max_daily_loss_pct) < 0
+        or isinstance(max_open_trades, bool)
+        or not isinstance(max_open_trades, int)
+        or max_open_trades < 0
+    ):
+        return CircuitBreakerConfig(enabled="malformed")  # type: ignore[arg-type]
+    return CircuitBreakerConfig(
+        enabled=enabled,
+        max_consecutive_losses=max_losses,
+        max_daily_loss_pct=float(max_daily_loss_pct),
+        max_open_trades=max_open_trades,
+    )
+
+
+def _scheduler_circuit_breaker_status(repo_root: Path, symbol: str = "") -> str:
+    CircuitBreakerConfig, evaluate_circuit_breaker, build_observations = (
+        _load_circuit_breaker_helpers()
+    )
+    try:
+        config = _load_circuit_breaker_config(repo_root)
+        if isinstance(config, CircuitBreakerConfig) and config.enabled is False:
+            return "disabled"
+        observations = build_observations(symbol)
+        result = evaluate_circuit_breaker(config, observations)
+        return "blocked" if result.blocked else "normal"
+    except Exception:
+        return "blocked"
 
 
 def _load_watcher_classes():
@@ -144,9 +239,36 @@ def run_watcher_cycle(
         enable_poke_handoff=True,
     )
     result = watcher.run_once(payloads)
+    status_symbol = ""
+    if payloads and isinstance(payloads[0], dict):
+        status_symbol = str(payloads[0].get("symbol", "")).strip().upper()
+    runtime_state_path_written = ""
+    try:
+        default_runtime_state = _load_runtime_state_helpers()
+        state = default_runtime_state()
+        state.circuit_breaker_status = _scheduler_circuit_breaker_status(
+            root,
+            status_symbol,
+        )
+        state.positions_summary = {
+            "open_positions": 0,
+            "source": "repo-backed audit artifacts",
+        }
+        state.latest_signal_ids = [
+            str(payload.get("signal_id", "") or payload.get("event_id", ""))
+            for payload in payloads
+            if isinstance(payload, dict)
+            and str(payload.get("signal_id", "") or payload.get("event_id", "")).strip()
+        ]
+        state.last_error = fetch_error
+        state.last_health_check = _utc_now_iso()
+        runtime_state_path_written = str(write_runtime_state(state, repo_root=root))
+    except Exception as exc:
+        fetch_error = "; ".join(part for part in (fetch_error, str(exc)) if part)
     result["candidate_count"] = len(payloads)
     result["artifact_dir"] = str(writer.artifact_dir)
     result["fetch_error"] = fetch_error
+    result["runtime_state_path"] = runtime_state_path_written
     return result
 
 

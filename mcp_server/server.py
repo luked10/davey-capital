@@ -53,6 +53,12 @@ SONNET_MODULE_PATH = (
 RUNTIME_SCAFFOLD_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "runtime_scaffold.py"
 )
+CIRCUIT_BREAKER_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "risk" / "circuit_breaker.py"
+)
+OBSERVATIONS_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "risk" / "observations.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -72,11 +78,19 @@ runtime_scaffold_module = _load_module(
     "davey_mcp_runtime_scaffold",
     RUNTIME_SCAFFOLD_MODULE_PATH,
 )
+circuit_breaker_module = _load_module(
+    "davey_mcp_circuit_breaker",
+    CIRCUIT_BREAKER_MODULE_PATH,
+)
+observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
 load_runtime_state = runtime_state_module.load_runtime_state
 SonnetProposalClient = sonnet_module.SonnetProposalClient
+CircuitBreakerConfig = circuit_breaker_module.CircuitBreakerConfig
+evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
+build_observations = observations_module.build_observations
 
 from contracts.bridge_contract import ExecutionIntent, validate_execution_intent
 from contracts.overnight_scaffold import validate_poke_handoff_payload
@@ -104,6 +118,70 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             rows.append(payload)
     return rows
+
+
+def _safe_enabled_circuit_breaker_config() -> Any:
+    return CircuitBreakerConfig(
+        enabled=True,
+        max_consecutive_losses=3,
+        max_daily_loss_pct=0.02,
+        max_open_trades=5,
+    )
+
+
+def _malformed_circuit_breaker_config() -> Any:
+    return CircuitBreakerConfig(enabled="malformed")  # type: ignore[arg-type]
+
+
+def _load_circuit_breaker_config(repo_root: Path) -> tuple[Any, str]:
+    config_path = repo_root / "circuit_breaker_config.json"
+    if not config_path.exists():
+        return _safe_enabled_circuit_breaker_config(), ""
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return _malformed_circuit_breaker_config(), f"malformed config JSON: {exc}"
+    if not isinstance(payload, dict):
+        return _malformed_circuit_breaker_config(), "malformed config: expected JSON object"
+
+    enabled = payload.get("enabled")
+    max_losses = payload.get("max_consecutive_losses")
+    max_daily_loss_pct = payload.get("max_daily_loss_pct")
+    max_open_trades = payload.get("max_open_trades")
+    if (
+        not isinstance(enabled, bool)
+        or isinstance(max_losses, bool)
+        or not isinstance(max_losses, int)
+        or max_losses < 0
+        or isinstance(max_daily_loss_pct, bool)
+        or not isinstance(max_daily_loss_pct, (int, float))
+        or float(max_daily_loss_pct) < 0
+        or isinstance(max_open_trades, bool)
+        or not isinstance(max_open_trades, int)
+        or max_open_trades < 0
+    ):
+        return _malformed_circuit_breaker_config(), "malformed config fields"
+    return (
+        CircuitBreakerConfig(
+            enabled=enabled,
+            max_consecutive_losses=max_losses,
+            max_daily_loss_pct=float(max_daily_loss_pct),
+            max_open_trades=max_open_trades,
+        ),
+        "",
+    )
+
+
+def _circuit_breaker_payload(result: Any, *, config_error: str = "") -> dict[str, Any]:
+    return {
+        "allowed": bool(getattr(result, "allowed", False)),
+        "blocked": bool(getattr(result, "blocked", True)),
+        "needs_human": bool(getattr(result, "needs_human", True)),
+        "reason": str(getattr(result, "reason", "")),
+        "triggered_rules": list(getattr(result, "triggered_rules", [])),
+        "observed": dict(getattr(result, "observed", {})),
+        "config_error": config_error,
+    }
 
 
 def _candidate_summary(row: dict[str, Any], *, session_id: str) -> dict[str, Any]:
@@ -225,6 +303,59 @@ class PokeBridgeService:
 
         proposal_payload: dict[str, Any] = {}
         if proceed:
+            observations = build_observations(candidate["symbol"])
+            cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
+            cb_result = evaluate_circuit_breaker(cb_config, observations)
+            cb_payload = _circuit_breaker_payload(
+                cb_result,
+                config_error=cb_config_error,
+            )
+            writer.write_decision_artifact(
+                decision_id=f"circuit-breaker-{handoff_id}",
+                decision="blocked" if cb_result.blocked else "normal",
+                rationale=cb_result.reason,
+                source="circuit_breaker",
+                context={
+                    "handoff_id": handoff_id,
+                    "candidate": candidate,
+                    "circuit_breaker": cb_payload,
+                },
+            )
+            if cb_result.blocked:
+                proposal_payload = {
+                    "intent_id": "",
+                    "intent": None,
+                    "validation": None,
+                    "token_meta": {},
+                    "raw": "",
+                    "needs_human": True,
+                    "error": cb_result.reason,
+                    "circuit_breaker": cb_payload,
+                    "proposal_text": _proposal_text(
+                        symbol=candidate["symbol"],
+                        side=candidate["side"],
+                        confidence=candidate["confidence"],
+                        intent=None,
+                        rationale="Circuit breaker requires human review: "
+                        + cb_result.reason,
+                    ),
+                }
+                writer.append_triage_decision(
+                    handoff_id=handoff_id,
+                    proceed=proceed,
+                    reason=reason,
+                    candidate=candidate,
+                    proposal=proposal_payload,
+                )
+                return {
+                    "handoff_id": handoff_id,
+                    "status": "proposal_needs_human",
+                    "needs_human": True,
+                    "candidate": candidate,
+                    "proposal": proposal_payload,
+                    "message": proposal_payload["proposal_text"],
+                }
+
             client = SonnetProposalClient()
             proposal_result = client.propose(
                 {
@@ -264,6 +395,7 @@ class PokeBridgeService:
                     },
                     "token_meta": dict(proposal_result.token_meta),
                     "raw": proposal_result.raw,
+                    "circuit_breaker": cb_payload,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],
@@ -287,6 +419,7 @@ class PokeBridgeService:
                     "raw": proposal_result.raw,
                     "error": proposal_result.error,
                     "needs_human": True,
+                    "circuit_breaker": cb_payload,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],

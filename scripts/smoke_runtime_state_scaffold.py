@@ -54,7 +54,7 @@ def main() -> None:
             live_mode=False,
             positions_summary={"open_positions": 2, "source": "repo-backed artifacts"},
             latest_signal_ids=["sig-0001", "sig-0002"],
-            circuit_breaker_status={"enabled": False, "allowed": True},
+            circuit_breaker_status="normal",
             last_error="",
             last_health_check="2026-06-10T00:00:00Z",
         )

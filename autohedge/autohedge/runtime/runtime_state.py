@@ -44,7 +44,7 @@ class RuntimeState:
     live_mode: bool = False
     positions_summary: dict[str, Any] = field(default_factory=dict)
     latest_signal_ids: list[str] = field(default_factory=list)
-    circuit_breaker_status: dict[str, Any] = field(default_factory=dict)
+    circuit_breaker_status: str = "disabled"
     last_error: str = ""
     last_health_check: str = ""
     updated_at: str = ""
@@ -106,8 +106,11 @@ def _validate_state_payload(payload: Any, reasons: list[str]) -> RuntimeState | 
             reasons.append("latest_signal_ids must be a list of strings")
 
     circuit_breaker_status = payload.get("circuit_breaker_status")
-    if "circuit_breaker_status" in payload and not isinstance(circuit_breaker_status, dict):
-        reasons.append("circuit_breaker_status must be a dict")
+    if "circuit_breaker_status" in payload:
+        if circuit_breaker_status not in {"normal", "blocked", "disabled"}:
+            reasons.append(
+                "circuit_breaker_status must be one of: normal, blocked, disabled"
+            )
 
     for key in ("last_error", "last_health_check", "updated_at"):
         if key in payload and not isinstance(payload.get(key), str):
@@ -127,7 +130,7 @@ def _validate_state_payload(payload: Any, reasons: list[str]) -> RuntimeState | 
         live_mode=live_mode,
         positions_summary=dict(positions_summary),
         latest_signal_ids=list(latest_signal_ids),
-        circuit_breaker_status=dict(circuit_breaker_status),
+        circuit_breaker_status=circuit_breaker_status,
         last_error=payload["last_error"],
         last_health_check=payload["last_health_check"],
         updated_at=payload["updated_at"],

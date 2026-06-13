@@ -98,6 +98,51 @@ def main() -> None:
         assert rows[0]["proceed"] is False
         assert rows[0]["reason"] == "manual smoke reject"
 
+        _write_jsonl(
+            queue_path,
+            [
+                {
+                    "handoff_id": "handoff-0002",
+                    "run_id": "run-0002",
+                    "created_at": "2026-06-12T00:01:00Z",
+                    "candidate_event_id": "candidate-0002",
+                    "destination": "poke_bridge_local_queue",
+                    "dry_run": True,
+                    "metadata": {
+                        "symbol": "NVDA",
+                        "side": "buy",
+                        "confidence": 0.9,
+                    },
+                }
+            ],
+        )
+        (root / "circuit_breaker_config.json").write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "max_consecutive_losses": 0,
+                    "max_daily_loss_pct": 0.02,
+                    "max_open_trades": 5,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        blocked = service.submit_triage_decision(
+            handoff_id="handoff-0002",
+            proceed=True,
+            reason="manual smoke proceed",
+        )
+        assert blocked["status"] == "proposal_needs_human"
+        assert blocked["needs_human"] is True
+        assert blocked["proposal"]["intent"] is None
+        assert blocked["proposal"]["circuit_breaker"]["blocked"] is True
+
+        cb_path = root / "logs" / "audit" / "smoke-session" / "decision-circuit-breaker-handoff-0002.json"
+        cb_payload = json.loads(cb_path.read_text(encoding="utf-8"))
+        assert cb_payload["decision"] == "blocked"
+        assert cb_payload["context"]["circuit_breaker"]["blocked"] is True
+
         status = service.get_system_status()
         assert status["active_broker"] == "paper"
         assert status["dry_run"] is True
