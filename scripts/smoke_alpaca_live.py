@@ -42,8 +42,12 @@ def main() -> None:
         return
     if os.getenv("DAVEY_LIVE_MODE", "").strip() != "1":
         raise RuntimeError("DAVEY_LIVE_MODE=1 is required for Alpaca execution smoke")
-    if not os.getenv("ALPACA_API_KEY") or not os.getenv("ALPACA_SECRET_KEY"):
-        raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY are required")
+    if not os.getenv("ALPACA_API_KEY") or not (
+        os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_API_SECRET")
+    ):
+        raise RuntimeError(
+            "ALPACA_API_KEY and ALPACA_SECRET_KEY or ALPACA_API_SECRET are required"
+        )
 
     with tempfile.TemporaryDirectory(prefix="alpaca-live-smoke-") as tmp:
         alpaca_live = _load_alpaca_live_module()

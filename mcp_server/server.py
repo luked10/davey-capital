@@ -541,6 +541,10 @@ class PokeBridgeService:
             intent_id=intent_id,
             reason=reason,
         )
+        print(
+            f"approval path: live execution blocked for {handoff_id}: {reason}",
+            flush=True,
+        )
         return f"Approval for {handoff_id} blocked: {reason}"
 
     def _update_runtime_state_after_fill(self, fill: FillRecord) -> None:
@@ -607,6 +611,11 @@ class PokeBridgeService:
                 approved_at=_utc_now_iso(),
             )
             if proposed_intent.dry_run is False and not live_mode:
+                print(
+                    "approval path: forced dry-run audit only for "
+                    f"{handoff_id}; DAVEY_LIVE_MODE is not 1",
+                    flush=True,
+                )
                 writer.write_decision_artifact(
                     decision_id=f"live-mode-forced-dry-run-{handoff_id}",
                     decision="forced_dry_run",
@@ -650,6 +659,10 @@ class PokeBridgeService:
             intent_id = normalized_intent.intent_id
 
             if normalized_intent.dry_run is False:
+                print(
+                    f"approval path: live Alpaca execution for {handoff_id}",
+                    flush=True,
+                )
                 observations = build_observations(normalized_intent.symbol)
                 cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
                 cb_result = evaluate_circuit_breaker(cb_config, observations)
@@ -716,6 +729,11 @@ class PokeBridgeService:
                     intent_id=intent_id,
                     reason="approved and submitted to Alpaca",
                 )
+                print(
+                    "approval path: live Alpaca execution complete for "
+                    f"{handoff_id}: order_id={fill.order_id} status={fill.status}",
+                    flush=True,
+                )
                 return (
                     f"Approved {handoff_id}; submitted Alpaca order "
                     f"{fill.order_id} with status {fill.status}."
@@ -729,10 +747,19 @@ class PokeBridgeService:
             reason="" if approved else "rejected by human approval gate",
         )
         if approved:
+            print(
+                f"approval path: dry-run audit only for {handoff_id}; "
+                "no broker order created",
+                flush=True,
+            )
             return (
                 f"Approved {handoff_id}; wrote dry-run approved intent artifact "
                 f"{intent_id}. No broker order was created."
             )
+        print(
+            f"approval path: rejected by human approval gate for {handoff_id}",
+            flush=True,
+        )
         return f"Rejected {handoff_id}; no intent artifact or broker action taken."
 
     def get_system_status(self) -> dict[str, Any]:
