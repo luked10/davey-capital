@@ -45,7 +45,7 @@ def _repo_root() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     if any(os.getenv(name) for name in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")):
-        return Path("/app")
+        return Path("/data")
     return Path(__file__).resolve().parents[2]
 
 
@@ -281,10 +281,11 @@ def run_watcher_cycle(
         session_id=clean_session_id,
         artifact_root=root / "logs" / "overnight",
     )
+    watcher_dry_run = not live_mode_enabled_from_env()
     watcher = DeterministicTier0Watcher(
         run_id=clean_run_id,
         writer=writer,
-        dry_run=True,
+        dry_run=watcher_dry_run,
         enable_poke_handoff=True,
     )
     result = watcher.run_once(payloads)
@@ -406,7 +407,7 @@ def build_scheduler(
 ) -> LocalSchedulerScaffold:
     scheduler = LocalSchedulerScaffold(
         enabled=scheduler_enabled_from_env() if enabled is None else enabled,
-        dry_run=True,
+        dry_run=not live_mode_enabled_from_env(),
         prefer_apscheduler=prefer_apscheduler,
     )
     scheduler.register_interval_job(

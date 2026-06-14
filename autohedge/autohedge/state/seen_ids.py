@@ -23,12 +23,15 @@ def _default_davey_root() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     if any(os.getenv(name) for name in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")):
-        return Path("/app")
+        return Path("/data")
     return Path.cwd().resolve()
 
 
 def _warn(message: str) -> None:
     print(f"seen_ids warning: {message}", file=sys.stderr, flush=True)
+
+
+_logged_db_paths: set[str] = set()
 
 
 class SeenIdsStore:
@@ -56,6 +59,10 @@ class SeenIdsStore:
         self._initialized = False
         self._warned_fallback = False
         self._ensure_db()
+        db_key = str(self.db_path)
+        if db_key not in _logged_db_paths:
+            _logged_db_paths.add(db_key)
+            print(f"seen_ids store: db_path={self.db_path}", flush=True)
 
     @property
     def using_fallback(self) -> bool:

@@ -38,7 +38,7 @@ def _default_davey_root() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     if any(os.getenv(name) for name in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")):
-        return Path("/app")
+        return Path("/data")
     return CODE_ROOT.resolve()
 
 
@@ -305,6 +305,7 @@ class PokeBridgeService:
 
     def get_pending_candidates(self) -> list[CandidateSignal]:
         pending: list[CandidateSignal] = []
+        already_seen_count = 0
         for path in self._queue_paths():
             session_id = path.parent.name
             for row in _read_jsonl(path):
@@ -314,6 +315,7 @@ class PokeBridgeService:
                 normalized = validation.normalized
                 handoff_id = normalized["handoff_id"]
                 if self.seen_ids.is_seen(handoff_id):
+                    already_seen_count += 1
                     print(f"candidate already seen: {handoff_id}", flush=True)
                     continue
                 try:
@@ -323,6 +325,12 @@ class PokeBridgeService:
                 pending.append(candidate)
                 self.seen_ids.mark_seen(handoff_id)
                 print(f"new candidate found: {handoff_id}", flush=True)
+        print(
+            "pending candidates scan: "
+            f"unseen={len(pending)} already_seen={already_seen_count} "
+            f"db={self.seen_ids.db_path}",
+            flush=True,
+        )
         return pending
 
     def submit_triage_decision(

@@ -207,9 +207,30 @@ def main() -> None:
             live_cycle = runtime.run_watcher_cycle(
                 session_id="scheduler-live-smoke",
                 repo_root=tmp,
-                fetcher=lambda: [],
+                fetcher=lambda: [
+                    {
+                        "symbol": "NVDA",
+                        "side": "buy",
+                        "confidence": 0.8,
+                        "strategy": "smoke",
+                        "source": "smoke_market_feed",
+                    }
+                ],
             )
             assert live_cycle["fetch_error"] == ""
+            assert live_cycle["summary"]["dry_run"] is False
+            live_queue_path = (
+                Path(tmp)
+                / "logs"
+                / "overnight"
+                / "scheduler-live-smoke"
+                / "poke_bridge_queue.jsonl"
+            )
+            assert live_queue_path.exists()
+            live_handoff = json.loads(
+                live_queue_path.read_text(encoding="utf-8").splitlines()[0]
+            )
+            assert live_handoff["dry_run"] is False
             live_state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
             assert live_state["active_broker"] == "alpaca"
             assert live_state["dry_run"] is False
