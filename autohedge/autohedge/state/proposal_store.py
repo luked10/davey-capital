@@ -45,7 +45,7 @@ class ProposalStore:
         )
         # Fix: use /data on Fly if available
         fly_data = Path("/data")
-        if fly_data.exists() and os.access(fly_data, os.W_OK):
+        if fly_data.exists():
             root = fly_data
 
         self.db_path = (
@@ -131,27 +131,28 @@ class ProposalStore:
 
     def get_proposal(self, handoff_id: str) -> dict[str, Any] | None:
         with self._lock:
-            if not self._db_available:
-                return self._fallback_proposals.get(handoff_id)
-            self._ensure_db()
-            try:
-                with self._connect() as conn:
-                    row = conn.execute(
-                        """
-                        SELECT session_id, candidate_json, proposal_payload_json, intent_json 
-                        FROM proposals WHERE handoff_id = ?
-                        """,
-                        (handoff_id,),
-                    ).fetchone()
-                if row:
-                    return {
-                        "session_id": row[0],
-                        "candidate": json.loads(row[1]),
-                        "proposal_payload": json.loads(row[2]),
-                        "intent_json": row[3],
-                    }
-                return self._fallback_proposals.get(handoff_id)
-            except sqlite3.Error as exc:
-                self._db_available = False
-                _warn(f"Lookup failed: {exc}")
-                return self._fallback_proposals.get(handoff_id)
+            # Check DB first
+            if self._db_available:
+                self._ensure_db()
+                try:
+                    with self._connect() as conn:
+                        row = conn.execute(
+                            """
+                            SELECT session_id, candidate_json, proposal_payload_json, intent_json 
+                            FROM proposals WHERE handoff_id = ?
+                            """,
+                            (handoff_id,),
+                        ).fetchone()
+                    if row:
+                        return {
+                            "session_id": row[0],
+                            "candidate": json.loads(row[1]),
+                            "proposal_payload": json.loads(row[2]),
+                            "intent_json": row[3],
+                        }
+                except sqlite3.Error as exc:
+                    self._db_available = False
+                    _warn(f"Lookup failed: {exc}")
+            
+            # Fallback to in-memory
+            return self._fallback_proposals.get(handoff_id)

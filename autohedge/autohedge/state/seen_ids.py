@@ -47,7 +47,7 @@ class SeenIdsStore:
         )
         # Fix: use /data on Fly if available, otherwise default root
         fly_data = Path("/data")
-        if fly_data.exists() and os.access(fly_data, os.W_OK):
+        if fly_data.exists():
             root = fly_data
 
         self.db_path = (
@@ -120,28 +120,27 @@ class SeenIdsStore:
                     )
             except sqlite3.Error as exc:
                 self._db_available = False
-                self._warn_fallback_once(str(exc))
+                _warn_fallback_once(str(exc))
 
     def is_seen(self, handoff_id: str) -> bool:
         clean_id = _clean_text(handoff_id)
         if not clean_id:
             return False
         with self._lock:
-            if clean_id in self._fallback_seen:
-                return True
-            if not self._db_available:
-                return False
-            self._ensure_db()
-            if not self._db_available:
-                return clean_id in self._fallback_seen
-            try:
-                with self._connect() as conn:
-                    row = conn.execute(
-                        "SELECT 1 FROM seen_ids WHERE handoff_id = ? LIMIT 1",
-                        (clean_id,),
-                    ).fetchone()
-                return row is not None
-            except sqlite3.Error as exc:
-                self._db_available = False
-                self._warn_fallback_once(str(exc))
-                return clean_id in self._fallback_seen
+            # Check DB first
+            if self._db_available:
+                self._ensure_db()
+                try:
+                    with self._connect() as conn:
+                        row = conn.execute(
+                            "SELECT 1 FROM seen_ids WHERE handoff_id = ? LIMIT 1",
+                            (clean_id,),
+                        ).fetchone()
+                    if row is not None:
+                        return True
+                except sqlite3.Error as exc:
+                    self._db_available = False
+                    _warn_fallback_once(str(exc))
+            
+            # Fallback to in-memory
+            return clean_id in self._fallback_seen
