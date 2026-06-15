@@ -311,14 +311,22 @@ def _load_trades(run_dir: Path) -> List[TradeRecord]:
     # trades.csv has entry+exit row pairs; extract exit rows (they have pnl != 0)
     trades = []
     exit_rows = df[df["pnl"] != 0].reset_index(drop=True)
-    for _, row in exit_rows.iterrows():
+    # Coerce the whole timestamp column once so NaN/invalid values become NaT
+    # rather than raising. If the column is absent, fall back to the legacy
+    # "2000-01-01" sentinel for every row.
+    if "timestamp" in exit_rows.columns:
+        timestamps = pd.to_datetime(exit_rows["timestamp"], errors="coerce").tolist()
+    else:
+        timestamps = [pd.Timestamp("2000-01-01")] * len(exit_rows)
+    for idx, (_, row) in enumerate(exit_rows.iterrows()):
+        ts = timestamps[idx]
         trades.append(TradeRecord(
             symbol=str(row.get("code", "")),
             direction=1 if row.get("side") == "sell" else -1,
             entry_price=0.0,
             exit_price=float(row.get("price", 0)),
-            entry_time=pd.Timestamp(row.get("timestamp", "2000-01-01")),
-            exit_time=pd.Timestamp(row.get("timestamp", "2000-01-01")),
+            entry_time=ts,
+            exit_time=ts,
             size=float(row.get("qty", 0)),
             leverage=1.0,
             pnl=float(row.get("pnl", 0)),

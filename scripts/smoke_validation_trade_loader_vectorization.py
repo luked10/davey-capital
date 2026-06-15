@@ -23,7 +23,7 @@ from typing import Any, Callable, List
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VIBE_ROOT = REPO_ROOT / "vibe-trading"
+VIBE_ROOT = REPO_ROOT / "vibe-trading" / "agent"
 if str(VIBE_ROOT) not in sys.path:
     sys.path.insert(0, str(VIBE_ROOT))
 
