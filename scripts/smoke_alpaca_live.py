@@ -89,30 +89,30 @@ def _smoke_offline_market_price_fetch(alpaca_live_module) -> None:
             return b
 
         # A) Under cap — no quantity adjustment.
-        # 3 shares × $50 = $150 < $200
-        broker_a = make_broker(lambda sym: 50.0)
+        # 3 shares × $3 = $9 < $10
+        broker_a = make_broker(lambda sym: 3.0)
         order_a, notional_a = broker_a._validate_for_submission(
             _make_market_intent("smoke-a", quantity=3.0)
         )
         assert float(order_a["quantity"]) == 3.0, (
             f"qty should not change under cap, got {order_a['quantity']}"
         )
-        assert abs(notional_a - 150.0) < 0.01, f"notional should be 150, got {notional_a}"
+        assert abs(notional_a - 9.0) < 0.01, f"notional should be 9, got {notional_a}"
 
-        # B) Over cap — quantity reduced to floor(200/price).
-        # 5 shares × $80 = $400 > $200 → adjusted to floor(200/80) = 2 shares
-        broker_b = make_broker(lambda sym: 80.0)
+        # B) Over cap — quantity reduced to floor(10/price).
+        # 5 shares × $4 = $20 > $10 → adjusted to floor(10/4) = 2 shares
+        broker_b = make_broker(lambda sym: 4.0)
         order_b, notional_b = broker_b._validate_for_submission(
             _make_market_intent("smoke-b", quantity=5.0)
         )
-        expected_qty_b = max(0.001, math.floor(MAX_CAP / 80.0))  # 2
+        expected_qty_b = max(0.001, math.floor(MAX_CAP / 4.0))  # 2
         assert float(order_b["quantity"]) == float(expected_qty_b), (
             f"expected qty={expected_qty_b}, got {order_b['quantity']}"
         )
         assert notional_b <= MAX_CAP, f"notional {notional_b} exceeds cap {MAX_CAP}"
 
         # C) Price so high that even 1 share > cap → minimum qty 0.001.
-        # 2 shares × $500 = $1000 > $200 → floor(200/500) = 0 → min 0.001
+        # 2 shares × $500 = $1000 > $10 → floor(10/500) = 0 → min 0.001
         broker_c = make_broker(lambda sym: 500.0)
         order_c, notional_c = broker_c._validate_for_submission(
             _make_market_intent("smoke-c", quantity=2.0)
