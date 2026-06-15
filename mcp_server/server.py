@@ -74,6 +74,12 @@ SEEN_IDS_MODULE_PATH = (
 PROPOSAL_STORE_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "state" / "proposal_store.py"
 )
+OVERNIGHT_WATCHER_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "overnight_scaffold.py"
+)
+MARKET_FEED_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "data" / "market_feed.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -105,6 +111,11 @@ proposal_store_module = _load_module(
     "davey_mcp_proposal_store",
     PROPOSAL_STORE_MODULE_PATH,
 )
+overnight_watcher_module = _load_module(
+    "davey_mcp_overnight_watcher_scaffold",
+    OVERNIGHT_WATCHER_MODULE_PATH,
+)
+market_feed_module = _load_module("davey_mcp_market_feed", MARKET_FEED_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -116,6 +127,43 @@ build_observations = observations_module.build_observations
 AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
 SeenIdsStore = seen_ids_module.SeenIdsStore
 ProposalStore = proposal_store_module.ProposalStore
+OvernightArtifactWriter = overnight_watcher_module.OvernightArtifactWriter
+DeterministicTier0Watcher = overnight_watcher_module.DeterministicTier0Watcher
+
+_BULLISH_KEYWORDS = frozenset({
+    "surge", "soar", "jump", "rally", "beat", "record", "strong",
+    "growth", "gain", "rise", "higher", "outperform", "bullish",
+    "upgrade", "positive", "boost",
+})
+_BEARISH_KEYWORDS = frozenset({
+    "fall", "drop", "crash", "miss", "weak", "loss", "cut",
+    "lower", "underperform", "bearish", "decline", "plunge",
+    "downgrade", "negative", "warning",
+})
+_SURFACE_CONFIDENCE_THRESHOLD = 0.65
+
+
+def _extract_ticker_from_query(query: str, known_symbols: frozenset[str]) -> str | None:
+    """Extract the most likely ticker from a free-text query.
+
+    Prefers known WATCH_SYMBOLS (case-insensitive). Falls back to the first
+    all-uppercase 1–5 letter token in the original query.
+    """
+    import re
+    tokens = re.findall(r"\b([A-Za-z]{1,5})\b", query)
+    for t in tokens:
+        if t.upper() in known_symbols:
+            return t.upper()
+    upper_only = re.findall(r"\b([A-Z]{1,5})\b", query)
+    return upper_only[0] if upper_only else None
+
+
+def _headline_sentiment(title: str) -> tuple[int, int]:
+    """Return (bullish_hits, bearish_hits) for a news headline using substring match."""
+    lower = title.lower()
+    bull = sum(1 for kw in _BULLISH_KEYWORDS if kw in lower)
+    bear = sum(1 for kw in _BEARISH_KEYWORDS if kw in lower)
+    return bull, bear
 
 from contracts.bridge_contract import (
     ExecutionIntent,
@@ -1011,6 +1059,205 @@ class PokeBridgeService:
             "last_error": state.last_error,
         }
 
+    def research_and_surface_candidates(self, query: str) -> dict[str, Any]:
+        """Research a symbol via yfinance news and surface a candidate if warranted."""
+        query = str(query or "").strip()
+        known: frozenset[str] = frozenset(market_feed_module.WATCH_SYMBOLS)
+        symbol = _extract_ticker_from_query(query, known)
+        if not symbol:
+            return {"error": "No ticker symbol found in query", "query": query, "queued": False}
+
+        try:
+            import yfinance as yf
+        except ImportError:
+            return {"error": "yfinance not installed", "symbol": symbol, "queued": False}
+
+        ticker = yf.Ticker(symbol)
+
+        news: list[dict[str, Any]] = []
+        try:
+            news = list(ticker.news or [])
+        except Exception:
+            pass
+
+        bullish_total = 0
+        bearish_total = 0
+        relevant_headlines: list[dict[str, Any]] = []
+        for item in news[:10]:
+            title = str(item.get("title") or "")
+            bull, bear = _headline_sentiment(title)
+            if bull > 0 or bear > 0:
+                relevant_headlines.append({
+                    "title": title,
+                    "signal": "bullish" if bull > bear else ("bearish" if bear > bull else "neutral"),
+                })
+            bullish_total += bull
+            bearish_total += bear
+
+        side = "buy" if bullish_total >= bearish_total else "sell"
+        net_score = abs(bullish_total - bearish_total)
+
+        price_move: float | None = None
+        latest_price: float | None = None
+        volume_ratio: float | None = None
+
+        try:
+            hourly = ticker.history(period="2d", interval="60m", auto_adjust=False)
+            if hourly is not None and not getattr(hourly, "empty", True):
+                closes = [float(v) for v in hourly["Close"].dropna().tolist() if v == v]
+                if len(closes) >= 2 and closes[-2] > 0:
+                    price_move = (closes[-1] - closes[-2]) / closes[-2]
+                    latest_price = closes[-1]
+        except Exception:
+            pass
+
+        try:
+            daily = ticker.history(period="30d", interval="1d", auto_adjust=False)
+            if daily is not None and not getattr(daily, "empty", True):
+                vols = [
+                    float(v) for v in daily["Volume"].dropna().tolist()
+                    if v == v and v > 0
+                ]
+                if len(vols) >= 2:
+                    avg_vol = sum(vols[:-1]) / len(vols[:-1])
+                    if avg_vol > 0:
+                        volume_ratio = vols[-1] / avg_vol
+        except Exception:
+            pass
+
+        confidence: float = 0.55
+        confidence += min(net_score * 0.03, 0.15)
+        if price_move is not None and abs(price_move) > 0.02:
+            confidence += 0.10
+            if bullish_total == bearish_total:
+                side = "buy" if price_move > 0 else "sell"
+        if volume_ratio is not None and volume_ratio > 1.5:
+            confidence += min((volume_ratio - 1.5) * 0.05, 0.10)
+        confidence = round(min(confidence, 0.95), 4)
+
+        queued = False
+        handoff_id = ""
+        queue_reason = ""
+        if confidence >= _SURFACE_CONFIDENCE_THRESHOLD:
+            try:
+                session_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+                writer = OvernightArtifactWriter(
+                    session_id=f"research-{session_date}",
+                    artifact_root=self.overnight_root,
+                )
+                watcher = DeterministicTier0Watcher(
+                    run_id=f"research-{_utc_now_iso()}",
+                    writer=writer,
+                    dry_run=True,
+                )
+                result = watcher.process_payload({
+                    "symbol": symbol,
+                    "side": side,
+                    "confidence": confidence,
+                    "strategy": "research_news_sentiment",
+                    "source": "research_and_surface_candidates",
+                    "dry_run": True,
+                    "metadata": {
+                        "query": query,
+                        "bullish_headlines": bullish_total,
+                        "bearish_headlines": bearish_total,
+                        "price_move_pct": round(price_move * 100, 2) if price_move is not None else None,
+                        "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
+                        "latest_price": round(latest_price, 2) if latest_price is not None else None,
+                        "relevant_headlines": relevant_headlines[:5],
+                    },
+                })
+                if result.get("status") == "ok":
+                    queued = True
+                    handoff_id = str(result.get("handoff_id", ""))
+                else:
+                    queue_reason = result.get("reason", "handoff failed")
+            except Exception as exc:
+                queue_reason = f"queue write failed: {exc}"
+        else:
+            queue_reason = (
+                f"confidence {confidence:.4f} below surface threshold "
+                f"{_SURFACE_CONFIDENCE_THRESHOLD}"
+            )
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "confidence": confidence,
+            "queued": queued,
+            "handoff_id": handoff_id,
+            "queue_reason": queue_reason,
+            "headlines_analyzed": len(news),
+            "relevant_headlines": relevant_headlines[:5],
+            "bullish_count": bullish_total,
+            "bearish_count": bearish_total,
+            "price_move_pct": round(price_move * 100, 2) if price_move is not None else None,
+            "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
+            "latest_price": round(latest_price, 2) if latest_price is not None else None,
+            "message": (
+                f"Queued {symbol} {side} candidate "
+                f"(confidence={confidence}) handoff_id={handoff_id}"
+                if queued
+                else f"No candidate queued for {symbol}: {queue_reason}"
+            ),
+        }
+
+    def get_market_overview(self) -> dict[str, Any]:
+        """Return current price, % change, and volume ratio for all watched tickers."""
+        symbols = list(market_feed_module.WATCH_SYMBOLS)
+
+        try:
+            import yfinance as yf
+        except ImportError:
+            return {"error": "yfinance not installed", "symbols": symbols, "overview": {}}
+
+        overview: dict[str, Any] = {}
+        for symbol in symbols:
+            try:
+                fast = yf.Ticker(symbol).fast_info
+
+                price: float | None = None
+                try:
+                    price = float(fast["last_price"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+                prev_close: float | None = None
+                try:
+                    prev_close = float(fast["previous_close"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+                pct_change: float | None = None
+                if price is not None and prev_close and prev_close > 0:
+                    pct_change = round((price - prev_close) / prev_close * 100, 2)
+
+                volume_ratio: float | None = None
+                try:
+                    last_vol = float(fast.get("last_volume") or 0)
+                    avg_vol = float(fast.get("three_month_average_volume") or 0)
+                    if last_vol > 0 and avg_vol > 0:
+                        volume_ratio = round(last_vol / avg_vol, 2)
+                except Exception:
+                    pass
+
+                overview[symbol] = {
+                    "price": round(price, 2) if price is not None else None,
+                    "pct_change_today": pct_change,
+                    "prev_close": round(prev_close, 2) if prev_close is not None else None,
+                    "volume_ratio_3m": volume_ratio,
+                    "side": "buy" if (pct_change or 0) >= 0 else "sell",
+                    "status": "ok",
+                }
+            except Exception as exc:
+                overview[symbol] = {"status": "error", "error": str(exc)}
+
+        return {
+            "symbols": symbols,
+            "snapshot_at": _utc_now_iso(),
+            "overview": overview,
+        }
+
     def get_daily_report(self) -> str:
         """Return today's local nova-alpha report for Poke/SMS delivery."""
         try:
@@ -1110,6 +1357,14 @@ def get_daily_report() -> str:
     return SERVICE.get_daily_report()
 
 
+def research_and_surface_candidates(query: str) -> dict[str, Any]:
+    return SERVICE.research_and_surface_candidates(query)
+
+
+def get_market_overview() -> dict[str, Any]:
+    return SERVICE.get_market_overview()
+
+
 def build_mcp_app():
     """Build the MCP app lazily so offline imports do not require mcp."""
     try:
@@ -1125,6 +1380,8 @@ def build_mcp_app():
     app.tool()(record_approval_decision)
     app.tool()(get_system_status)
     app.tool()(get_daily_report)
+    app.tool()(research_and_surface_candidates)
+    app.tool()(get_market_overview)
     return app
 
 

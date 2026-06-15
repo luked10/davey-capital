@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 
-WATCH_SYMBOLS = ("NVDA", "MU")  # Crypto disabled pending Alpaca account enablement
+WATCH_SYMBOLS = (
+    "NVDA", "MU", "AMD", "TSLA", "META", "GOOGL",
+    "AMZN", "AAPL", "MSFT", "PLTR", "ARM", "SMCI",
+    # Crypto disabled pending Alpaca account enablement
+    # "BTC/USD", "SOL/USD",
+)
 PRICE_MOVE_THRESHOLD = 0.02
 VOLUME_MULTIPLIER_THRESHOLD = 1.5
 
