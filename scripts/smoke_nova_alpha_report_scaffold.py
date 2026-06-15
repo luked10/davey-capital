@@ -200,6 +200,23 @@ def main() -> None:
         assert "No NEEDS_HUMAN events recorded." in empty_report
         assert "default: disabled no-op" in empty_report
 
+        # Malformed runtime_state.json: two JSON objects concatenated ("Extra data").
+        # load_local_artifacts must recover the first object via raw_decode, not crash.
+        bad_state_root = Path(tmp) / "bad-runtime-state"
+        bad_state_root.mkdir()
+        (bad_state_root / "runtime_state.json").write_text(
+            '{"active_broker":"paper","dry_run":true,"live_mode":false,'
+            '"circuit_breaker_status":{"enabled":false},"last_error":"",'
+            '"updated_at":"2026-06-10T00:00:00Z"}'
+            '{"stale":"extra_concatenated_object"}',
+            encoding="utf-8",
+        )
+        bad_artifacts = mod.load_local_artifacts(bad_state_root)
+        assert isinstance(bad_artifacts, dict), "malformed runtime_state.json must not crash"
+        assert bad_artifacts["circuit_breaker_status"].get("enabled") is False, (
+            "first JSON object should be recovered from malformed runtime_state.json"
+        )
+
         # Malformed inputs fail closed.
         try:
             mod.load_local_artifacts(Path(tmp) / "missing-root")

@@ -68,6 +68,8 @@ All smokes are deterministic and offline. A failing smoke blocks commit.
 4. Do not push from automated passes; humans review and push.
 5. Parser/vectorization files stabilized in Builds 6–7 and `validation.py` timestamp
    semantics are frozen — do not touch without an explicit reason.
+6. Do not push code changes to main during US market hours
+   (9:30 AM – 4:00 PM ET, Monday–Friday). Test locally first.
 
 ## Model / Tool Routing
 

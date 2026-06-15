@@ -143,10 +143,26 @@ def load_local_artifacts(
     circuit_breaker_status: Any = {}
     runtime_state_path = root / RUNTIME_STATE_FILE
     if runtime_state_path.exists():
+        _raw_state = ""
         try:
-            state_payload = json.loads(runtime_state_path.read_text(encoding="utf-8"))
-        except ValueError:
+            _raw_state = runtime_state_path.read_text(encoding="utf-8")
+            state_payload = json.loads(_raw_state)
+        except ValueError as _exc:
+            # "Extra data" means two JSON objects were concatenated on one line.
+            # Try raw_decode to recover the first valid object.
             state_payload = None
+            if _raw_state.strip():
+                try:
+                    state_payload, _ = json.JSONDecoder().raw_decode(_raw_state.strip())
+                    if not isinstance(state_payload, dict):
+                        state_payload = None
+                except ValueError:
+                    pass
+            if state_payload is None:
+                print(
+                    f"runtime_state.json parse failed (using defaults): {_exc}",
+                    flush=True,
+                )
         if isinstance(state_payload, dict):
             status = state_payload.get("circuit_breaker_status")
             if isinstance(status, (dict, str)):

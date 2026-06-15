@@ -7,26 +7,40 @@ from typing import Any
 def _load_candlestick_patterns():
     """Lazily load candlestick_patterns from vibe-trading/agent/src/tools/pattern_tool.py.
 
-    Returns None if the file is absent or fails to load — callers must handle None.
+    Tries multiple candidate paths in order so the loader works both locally
+    (relative to __file__) and on Fly (/app absolute path).
+    Returns None if unavailable — callers must handle None gracefully.
     """
     import importlib.util
     import os
 
-    path = os.path.normpath(
-        os.path.join(
+    candidate_paths = [
+        os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "../../../vibe-trading/agent/src/tools/pattern_tool.py",
+        )),
+        "/app/vibe-trading/agent/src/tools/pattern_tool.py",
+        os.path.join(os.getcwd(), "vibe-trading/agent/src/tools/pattern_tool.py"),
+    ]
+    path = next((p for p in candidate_paths if os.path.isfile(p)), None)
+    if path is None:
+        print(
+            "PatternTool unavailable: pattern_tool.py not found in any candidate path",
+            flush=True,
         )
-    )
+        return None
     try:
         spec = importlib.util.spec_from_file_location("pattern_tool", path)
         if spec is None or spec.loader is None:
+            print(f"PatternTool unavailable: no loader for {path}", flush=True)
             return None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return getattr(mod, "candlestick_patterns", None)
+        fn = getattr(mod, "candlestick_patterns", None)
+        print(f"PatternTool loaded from {path}", flush=True)
+        return fn
     except Exception as exc:
-        print(f"PatternTool unavailable: {exc}", flush=True)
+        print(f"PatternTool unavailable ({path}): {exc}", flush=True)
         return None
 
 
