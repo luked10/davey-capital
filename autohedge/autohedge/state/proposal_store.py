@@ -1,14 +1,4 @@
-"""Persistent proposal store for the Poke MCP bridge.
-
-Sonnet-generated ExecutionIntent proposals must survive a machine restart
-between ``submit_triage_decision`` (write) and ``record_approval_decision``
-(read). This store backs proposals on the Fly volume
-(``DAVEY_ROOT/state/proposals.db``) so nothing load-bearing lives only in RAM.
-
-Schema stores the full candidate and proposal_payload alongside intent_json so
-``get_proposal`` returns everything ``record_approval_decision`` needs without
-re-reading the watcher queue.
-"""
+"""Persistent proposal store for the Poke MCP bridge."""
 
 from __future__ import annotations
 
@@ -17,16 +7,13 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 from threading import Lock
 from typing import Any
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _clean_text(value: object) -> str:
-    return str(value or "").strip()
 
 
 def _default_davey_root() -> Path:
@@ -38,14 +25,21 @@ def _default_davey_root() -> Path:
     return Path.cwd().resolve()
 
 
-class ProposalStore:
-    """SQLite-backed store for triage proposals keyed by handoff_id.
+def _warn(message: str) -> None:
+    print(f"proposal_store warning: {message}", file=sys.stderr, flush=True)
 
-    Per-instance fallback dict is populated on every write so that reads
-    within the same process are fast even when the DB is temporarily
-    unavailable.  Each instance owns its own fallback so test isolation is
-    preserved (no class-level shared state).
-    """
+
+class ProposalStore:
+    """SQLite-backed proposal store to persist trade intents across server restarts."""
+
+    _instance = None
+    _initialized_global = False
+    _fallback_proposals: dict[str, dict[str, Any]] = {}
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ProposalStore, cls).__new__(cls)
+        return cls._instance
 
     def __init__(
         self,
@@ -53,21 +47,18 @@ class ProposalStore:
         davey_root: str | Path | None = None,
         db_path: str | Path | None = None,
     ) -> None:
+        if ProposalStore._initialized_global:
+            return
+            
         root = (
             Path(davey_root).expanduser().resolve()
             if davey_root is not None
             else _default_davey_root()
         )
-        # On Fly the persistent volume is mounted at /data.  If DAVEY_ROOT was
-        # not set explicitly but Fly env vars indicate we are running on the
-        # platform and /data is available, prefer it over the /app code root.
-        if davey_root is None and db_path is None and not os.getenv("DAVEY_ROOT"):
-            fly_data = Path("/data")
-            if fly_data.exists() and any(
-                os.getenv(n)
-                for n in ("FLY_APP_NAME", "FLY_MACHINE_ID", "FLY_REGION")
-            ):
-                root = fly_data
+        # Fix: use /data on Fly if available
+        fly_data = Path("/data")
+        if fly_data.exists():
+            root = fly_data
 
         self.db_path = (
             Path(db_path).expanduser().resolve()
@@ -77,18 +68,14 @@ class ProposalStore:
         self._lock = Lock()
         self._db_available = True
         self._initialized = False
-        self._fallback: dict[str, dict[str, Any]] = {}
+        self._warned_fallback = False
         self._ensure_db()
-        print(
-            f"ProposalStore: db_path={self.db_path}",
-            flush=True,
-        )
+        ProposalStore._initialized_global = True
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=30, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _ensure_db(self) -> None:
@@ -112,10 +99,7 @@ class ProposalStore:
             self._initialized = True
         except sqlite3.Error as exc:
             self._db_available = False
-            print(
-                f"ProposalStore._ensure_db: SQLite unavailable: {exc}",
-                flush=True,
-            )
+            _warn(f"SQLite unavailable: {exc}")
 
     def save_proposal(
         self,
@@ -125,163 +109,91 @@ class ProposalStore:
         proposal_payload: dict[str, Any],
         intent_json: str | None = None,
     ) -> None:
-        clean_id = _clean_text(handoff_id)
-        print(
-            f"ProposalStore.save_proposal: handoff_id={clean_id!r} db={self.db_path}",
-            flush=True,
-        )
-        if not clean_id:
-            print(
-                "ProposalStore.save_proposal: skipped (empty handoff_id)",
-                flush=True,
-            )
-            return
-        entry: dict[str, Any] = {
-            "session_id": session_id,
-            "candidate": candidate,
-            "proposal_payload": proposal_payload,
-            "intent_json": intent_json,
-        }
         with self._lock:
-            self._fallback[clean_id] = entry
+            # Always update global fallback
+            ProposalStore._fallback_proposals[handoff_id] = {
+                "session_id": session_id,
+                "candidate": candidate,
+                "proposal_payload": proposal_payload,
+                "intent_json": intent_json,
+            }
             if not self._db_available:
-                print(
-                    f"ProposalStore.save_proposal: DB unavailable, "
-                    f"stored in fallback only for handoff_id={clean_id}",
-                    flush=True,
-                )
                 return
             self._ensure_db()
             try:
                 with self._connect() as conn:
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO proposals
-                        (handoff_id, session_id, candidate_json,
-                         proposal_payload_json, intent_json, created_at)
+                        INSERT OR REPLACE INTO proposals 
+                        (handoff_id, session_id, candidate_json, proposal_payload_json, intent_json, created_at)
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            clean_id,
+                            handoff_id,
                             session_id,
-                            json.dumps(candidate, ensure_ascii=False),
-                            json.dumps(proposal_payload, ensure_ascii=False),
+                            json.dumps(candidate),
+                            json.dumps(proposal_payload),
                             intent_json,
                             _utc_now_iso(),
                         ),
                     )
-                    row_count = conn.execute(
-                        "SELECT COUNT(*) FROM proposals"
-                    ).fetchone()[0]
-                print(
-                    f"ProposalStore.save_proposal: committed handoff_id={clean_id} "
-                    f"total_rows={row_count}",
-                    flush=True,
-                )
             except sqlite3.Error as exc:
                 self._db_available = False
-                print(
-                    f"ProposalStore.save_proposal: write failed for "
-                    f"handoff_id={clean_id}: {exc} (stored in fallback)",
-                    flush=True,
-                )
+                _warn(f"Save failed: {exc}")
 
     def get_proposal(self, handoff_id: str) -> dict[str, Any] | None:
-        clean_id = _clean_text(handoff_id)
-        print(
-            f"ProposalStore.get_proposal: handoff_id={clean_id!r} db={self.db_path}",
-            flush=True,
-        )
-        if not clean_id:
-            return None
         with self._lock:
+            # Check DB first
             if self._db_available:
                 self._ensure_db()
                 try:
                     with self._connect() as conn:
                         row = conn.execute(
                             """
-                            SELECT session_id, candidate_json,
-                                   proposal_payload_json, intent_json
-                            FROM proposals WHERE handoff_id = ? LIMIT 1
+                            SELECT session_id, candidate_json, proposal_payload_json, intent_json 
+                            FROM proposals WHERE handoff_id = ?
                             """,
-                            (clean_id,),
+                            (handoff_id,),
                         ).fetchone()
-                    if row is not None:
-                        result = {
+                    if row:
+                        return {
                             "session_id": row[0],
                             "candidate": json.loads(row[1]),
                             "proposal_payload": json.loads(row[2]),
                             "intent_json": row[3],
                         }
-                        print(
-                            f"ProposalStore.get_proposal: hit handoff_id={clean_id} "
-                            f"has_intent={row[3] is not None}",
-                            flush=True,
-                        )
-                        return result
-                    print(
-                        f"ProposalStore.get_proposal: miss handoff_id={clean_id} in DB",
-                        flush=True,
-                    )
                 except sqlite3.Error as exc:
                     self._db_available = False
-                    print(
-                        f"ProposalStore.get_proposal: DB read failed for "
-                        f"handoff_id={clean_id}: {exc} (trying fallback)",
-                        flush=True,
-                    )
-            fallback = self._fallback.get(clean_id)
-            if fallback is not None:
-                print(
-                    f"ProposalStore.get_proposal: fallback hit handoff_id={clean_id}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"ProposalStore.get_proposal: miss handoff_id={clean_id} "
-                    "(DB and fallback both empty)",
-                    flush=True,
-                )
-            return fallback
+                    _warn(f"Lookup failed: {exc}")
+            
+            # Fallback to global in-memory
+            return ProposalStore._fallback_proposals.get(handoff_id)
 
     def delete_proposal(self, handoff_id: str) -> None:
-        clean_id = _clean_text(handoff_id)
-        print(
-            f"ProposalStore.delete_proposal: handoff_id={clean_id!r} db={self.db_path}",
-            flush=True,
-        )
-        if not clean_id:
-            return
+        """Remove a proposal from the store."""
         with self._lock:
-            self._fallback.pop(clean_id, None)
+            ProposalStore._fallback_proposals.pop(handoff_id, None)
             if not self._db_available:
                 return
             self._ensure_db()
             try:
                 with self._connect() as conn:
-                    conn.execute(
-                        "DELETE FROM proposals WHERE handoff_id = ?",
-                        (clean_id,),
-                    )
+                    conn.execute("DELETE FROM proposals WHERE handoff_id = ?", (handoff_id,))
             except sqlite3.Error as exc:
-                print(
-                    f"ProposalStore.delete_proposal: delete failed for "
-                    f"handoff_id={clean_id}: {exc}",
-                    flush=True,
-                )
+                self._db_available = False
+                _warn(f"Delete failed: {exc}")
 
     def count_proposals(self) -> int:
-        """Total rows in the proposals table (startup diagnostics)."""
+        """Count rows in the proposals table."""
         with self._lock:
             if not self._db_available:
-                return len(self._fallback)
+                return len(ProposalStore._fallback_proposals)
             self._ensure_db()
             try:
                 with self._connect() as conn:
-                    row = conn.execute(
-                        "SELECT COUNT(*) FROM proposals"
-                    ).fetchone()
-                return int(row[0]) if row is not None else 0
-            except sqlite3.Error:
-                return len(self._fallback)
+                    row = conn.execute("SELECT COUNT(*) FROM proposals").fetchone()
+                return int(row[0]) if row else 0
+            except sqlite3.Error as exc:
+                self._db_available = False
+                _warn(f"Count failed: {exc}")
+                return len(ProposalStore._fallback_proposals)
