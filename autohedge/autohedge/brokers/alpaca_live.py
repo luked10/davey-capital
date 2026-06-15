@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -179,6 +180,34 @@ class AlpacaLiveBroker:
             },
         )
 
+    def _fetch_market_price(self, symbol: str) -> float:
+        """Fetch the current last price for *symbol* via yfinance.
+
+        Raises ``ValueError`` if yfinance is not installed or the fetch fails
+        so the caller blocks the order instead of bypassing the $200 cap.
+        """
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ValueError(
+                "yfinance is not installed; cannot fetch market price for "
+                "notional cap enforcement — install yfinance or provide "
+                "metadata.estimated_price / metadata.notional"
+            ) from exc
+        # yfinance uses "BTC-USD" notation; our canonical form is "BTC/USD".
+        yf_symbol = symbol.replace("/", "-")
+        try:
+            price = yf.Ticker(yf_symbol).fast_info["last_price"]
+        except Exception as exc:
+            raise ValueError(
+                f"yfinance price fetch failed for {symbol}: {exc}"
+            ) from exc
+        if not isinstance(price, (int, float)) or price <= 0:
+            raise ValueError(
+                f"yfinance returned unusable price {price!r} for {symbol}"
+            )
+        return float(price)
+
     def _estimate_notional(self, intent: ExecutionIntent, order: dict[str, Any]) -> float | None:
         metadata = dict(intent.metadata or {})
         notional = _positive_float(metadata.get("notional"))
@@ -210,11 +239,37 @@ class AlpacaLiveBroker:
 
         order = execution_intent_to_broker_order(normalized)
         notional = self._estimate_notional(normalized, order)
+
         if notional is None:
-            raise ValueError(
-                "unable to enforce $200 max notional without limit_price, "
-                "metadata.notional, or metadata.estimated_price"
-            )
+            if normalized.order_type != "market":
+                raise ValueError(
+                    "unable to enforce $200 max notional without limit_price, "
+                    "metadata.notional, or metadata.estimated_price"
+                )
+            # Market order with no price hint: fetch live price to enforce cap.
+            # Fail closed — any fetch error blocks the order.
+            price = self._fetch_market_price(normalized.symbol)
+            raw_qty = float(order.get("quantity") or normalized.quantity)
+            estimated = price * raw_qty
+
+            if estimated > MAX_ORDER_NOTIONAL_USD:
+                adjusted_qty = max(0.001, math.floor(MAX_ORDER_NOTIONAL_USD / price))
+                print(
+                    f"market order: estimated price={price:.4f} "
+                    f"qty adjusted to {adjusted_qty} (was {raw_qty})",
+                    flush=True,
+                )
+                normalized = replace(normalized, quantity=adjusted_qty)
+                order = execution_intent_to_broker_order(normalized)
+                notional = price * adjusted_qty
+            else:
+                print(
+                    f"market order: estimated price={price:.4f} "
+                    f"notional=${estimated:.2f} within cap",
+                    flush=True,
+                )
+                notional = estimated
+
         if notional > MAX_ORDER_NOTIONAL_USD:
             raise ValueError(
                 f"order notional ${notional:.2f} exceeds hard ${MAX_ORDER_NOTIONAL_USD:.0f} cap"
