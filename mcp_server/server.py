@@ -903,6 +903,32 @@ class PokeBridgeService:
                         context={"order": order_payload},
                     )
 
+                # Write fill artifact. The trade already executed; if the write
+                # fails we log it and continue — audit failure must not trigger
+                # a retry or block the confirmation returned to Poke.
+                try:
+                    fill_result = writer.write_fill_artifact(
+                        fill, allow_live_fill=True
+                    )
+                    if fill_result.ok:
+                        print(
+                            f"fill artifact written: fill_id={fill.fill_id} "
+                            f"symbol={fill.symbol}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"fill artifact write incomplete for {fill.fill_id}: "
+                            + "; ".join(fill_result.reasons),
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(
+                        f"fill artifact write failed for {fill.fill_id} "
+                        f"(non-blocking): {exc}",
+                        flush=True,
+                    )
+
                 self._update_runtime_state_after_fill(fill)
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
@@ -919,7 +945,8 @@ class PokeBridgeService:
                 self._forget_proposal(handoff_id)
                 return (
                     f"Approved {handoff_id}; submitted Alpaca order "
-                    f"{fill.order_id} with status {fill.status}."
+                    f"{fill.order_id} (fill_id={fill.fill_id}) "
+                    f"with status {fill.status}."
                 )
 
         writer.append_approval_decision(

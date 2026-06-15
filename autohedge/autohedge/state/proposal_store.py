@@ -109,6 +109,8 @@ class ProposalStore:
         proposal_payload: dict[str, Any],
         intent_json: str | None = None,
     ) -> None:
+        if not str(handoff_id or "").strip():
+            return
         with self._lock:
             # Always update global fallback
             ProposalStore._fallback_proposals[handoff_id] = {
