@@ -71,6 +71,9 @@ ALPACA_LIVE_MODULE_PATH = (
 SEEN_IDS_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "state" / "seen_ids.py"
 )
+PROPOSAL_STORE_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "proposal_store.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -98,6 +101,7 @@ circuit_breaker_module = _load_module(
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
 alpaca_live_module = _load_module("davey_mcp_alpaca_live", ALPACA_LIVE_MODULE_PATH)
 seen_ids_module = _load_module("davey_mcp_seen_ids", SEEN_IDS_MODULE_PATH)
+proposal_store_module = _load_module("davey_mcp_proposal_store", PROPOSAL_STORE_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -108,10 +112,12 @@ evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
 AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
 SeenIdsStore = seen_ids_module.SeenIdsStore
+ProposalStore = proposal_store_module.ProposalStore
 
 from contracts.bridge_contract import (
     ExecutionIntent,
     FillRecord,
+    execution_intent_from_dict,
     execution_intent_to_broker_order,
     validate_execution_intent,
 )
@@ -274,7 +280,7 @@ class PokeBridgeService:
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
         self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
-        self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
+        self.proposal_store = ProposalStore(davey_root=self.repo_root)
 
     @property
     def overnight_root(self) -> Path:
@@ -512,12 +518,13 @@ class PokeBridgeService:
                         rationale=rationale,
                     ),
                 }
-                self.proposals_by_handoff[handoff_id] = {
-                    "intent": intent,
-                    "session_id": session_id,
-                    "candidate": candidate,
-                    "proposal": proposal_payload,
-                }
+                self.proposal_store.save_proposal(
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=json.dumps(audit_module.to_dict(intent)),
+                )
             else:
                 proposal_payload = {
                     "intent_id": "",
@@ -537,6 +544,21 @@ class PokeBridgeService:
                         or "Proposal generation requires human review.",
                     ),
                 }
+                # Fix: Attempt to extract intent from raw if possible.
+                intent_json = None
+                try:
+                    raw_intent_dict = json.loads(proposal_result.raw)
+                    intent_json = json.dumps(raw_intent_dict)
+                except (ValueError, TypeError):
+                    pass
+
+                self.proposal_store.save_proposal(
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=intent_json,
+                )
 
         writer.append_triage_decision(
             handoff_id=handoff_id,
@@ -634,10 +656,18 @@ class PokeBridgeService:
             provider="poke_mcp",
         )
 
-        proposal = self.proposals_by_handoff.get(handoff_id)
+        proposal = self.proposal_store.get_proposal(handoff_id)
         intent_id = ""
         if approved:
-            if proposal is None or not isinstance(proposal.get("intent"), ExecutionIntent):
+            intent = None
+            if proposal and proposal.get("intent_json"):
+                try:
+                    intent_dict = json.loads(proposal["intent_json"])
+                    intent = execution_intent_from_dict(intent_dict)
+                except (ValueError, TypeError):
+                    pass
+
+            if not intent:
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
                     approved=False,
@@ -649,7 +679,7 @@ class PokeBridgeService:
                     "available. No intent artifact written."
                 )
 
-            proposed_intent = proposal["intent"]
+            proposed_intent = intent
             live_mode = _live_mode_enabled()
             approved_intent = replace(
                 proposed_intent,
