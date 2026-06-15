@@ -7,28 +7,41 @@ from typing import Any
 def _load_candlestick_patterns():
     """Lazily load candlestick_patterns from vibe-trading/agent/src/tools/pattern_tool.py.
 
-    Tries multiple candidate paths in order so the loader works both locally
-    (relative to __file__) and on Fly (/app absolute path).
+    Tries multiple candidate agent dirs in order (local cwd first, then /app on Fly).
+    The agent dir must be on sys.path so pattern_tool.py's own 'from src.X import Y'
+    imports resolve correctly.
     Returns None if unavailable — callers must handle None gracefully.
     """
     import importlib.util
     import os
+    import sys
 
-    candidate_paths = [
+    # Candidate vibe-trading/agent directories; first one whose pattern_tool.py exists wins.
+    agent_dirs = [
+        os.path.join(os.getcwd(), "vibe-trading/agent"),
         os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "../../../vibe-trading/agent/src/tools/pattern_tool.py",
+            "../../../vibe-trading/agent",
         )),
-        "/app/vibe-trading/agent/src/tools/pattern_tool.py",
-        os.path.join(os.getcwd(), "vibe-trading/agent/src/tools/pattern_tool.py"),
+        "/app/vibe-trading/agent",
     ]
-    path = next((p for p in candidate_paths if os.path.isfile(p)), None)
-    if path is None:
+    agent_dir = next(
+        (d for d in agent_dirs if os.path.isfile(os.path.join(d, "src/tools/pattern_tool.py"))),
+        None,
+    )
+    if agent_dir is None:
         print(
             "PatternTool unavailable: pattern_tool.py not found in any candidate path",
             flush=True,
         )
         return None
+
+    # Add the agent dir to sys.path so pattern_tool.py's internal
+    # 'from src.tools.X import Y' imports resolve correctly.
+    if agent_dir not in sys.path:
+        sys.path.insert(0, agent_dir)
+
+    path = os.path.join(agent_dir, "src/tools/pattern_tool.py")
     try:
         spec = importlib.util.spec_from_file_location("pattern_tool", path)
         if spec is None or spec.loader is None:
