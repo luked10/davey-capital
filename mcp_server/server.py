@@ -25,6 +25,7 @@ from pathlib import Path
 import sys
 from threading import Thread
 from typing import Any
+import uuid
 
 from pydantic import ValidationError
 
@@ -172,7 +173,11 @@ from contracts.bridge_contract import (
     execution_intent_to_broker_order,
     validate_execution_intent,
 )
-from contracts.overnight_scaffold import validate_poke_handoff_payload
+from contracts.overnight_scaffold import (
+    CandidateEvent,
+    PokeBridgeHandoff,
+    validate_poke_handoff_payload,
+)
 from autohedge.schemas.models import CandidateSignal, TriageDecision
 
 
@@ -182,6 +187,138 @@ def _utc_now_iso() -> str:
 
 def _live_mode_enabled() -> bool:
     return os.getenv("DAVEY_LIVE_MODE", "").strip() == "1"
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 research routing (PART 3): enrich the Sonnet proposal by confidence.
+#
+#   Tier A (0.80–0.84): price data + Poke thesis + PatternTool only (no swarm).
+#   Tier B (0.85–0.89): + vibe-trading technical_analysis_panel swarm.
+#   Tier C (>= 0.90):   + vibe-trading investment_committee (bull/bear debate).
+#
+# vibe-trading is best-effort enrichment only: if VIBE_TRADING_URL is unset or
+# any call fails/times out we skip silently and NEVER block the pipeline.
+# ---------------------------------------------------------------------------
+
+_RESEARCH_TIER_B_MIN = 0.85
+_RESEARCH_TIER_C_MIN = 0.90
+_SWARM_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _research_tier_label(confidence: float) -> str:
+    if confidence >= _RESEARCH_TIER_C_MIN:
+        return "C"
+    if confidence >= _RESEARCH_TIER_B_MIN:
+        return "B"
+    return "A"
+
+
+def _select_research_preset(confidence: float) -> str | None:
+    """Map a candidate confidence to the vibe-trading swarm preset to run.
+
+    Tier A returns None (no swarm). Tier B runs the technical_analysis_panel.
+    Tier C runs the investment_committee. Below 0.80 also returns None.
+    """
+    try:
+        conf = float(confidence)
+    except (TypeError, ValueError):
+        return None
+    if conf >= _RESEARCH_TIER_C_MIN:
+        return "investment_committee"
+    if conf >= _RESEARCH_TIER_B_MIN:
+        return "technical_analysis_panel"
+    return None
+
+
+def _vibe_trading_base_url() -> str:
+    return os.getenv("VIBE_TRADING_URL", "").strip().rstrip("/")
+
+
+def _swarm_user_vars(preset_name: str, symbol: str) -> dict[str, str]:
+    """Map a symbol onto the variables each preset declares (see preset YAML)."""
+    if preset_name == "investment_committee":
+        return {"target": symbol, "market": "US"}
+    # technical_analysis_panel (and any default) take target + timeframe.
+    return {"target": symbol, "timeframe": "daily"}
+
+
+def call_vibe_trading_swarm(
+    preset_name: str,
+    user_vars: dict[str, str],
+    *,
+    timeout: float = 60.0,
+) -> dict[str, Any] | None:
+    """Best-effort vibe-trading swarm call. Returns a research dict or None.
+
+    Starts a swarm run (POST /swarm/runs), then polls run status until it
+    reaches a terminal state or the timeout elapses, returning the final
+    report. Skips silently (returns None) when VIBE_TRADING_URL is unset or on
+    ANY error/timeout. This is research enrichment only — it must never raise
+    into or block the proposal pipeline.
+    """
+    base = _vibe_trading_base_url()
+    if not base or not preset_name:
+        return None
+
+    import time
+    import urllib.request
+
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("VIBE_TRADING_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        timeout = max(1.0, float(timeout))
+    except (TypeError, ValueError):
+        timeout = 60.0
+    per_request_timeout = min(15.0, timeout)
+    deadline = time.monotonic() + timeout
+
+    try:
+        body = json.dumps(
+            {"preset_name": preset_name, "user_vars": dict(user_vars or {})}
+        ).encode("utf-8")
+        create_req = urllib.request.Request(
+            f"{base}/swarm/runs", data=body, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(create_req, timeout=per_request_timeout) as resp:
+            created = json.loads(resp.read().decode("utf-8"))
+        run_id = str(created.get("id") or "").strip()
+        if not run_id:
+            return None
+
+        # Poll run detail until terminal or timeout. The /swarm/runs/{id}/events
+        # SSE stream is the realtime alternative; the detail endpoint is polled
+        # here because it returns the final_report we attach to the proposal.
+        status = ""
+        final_report = ""
+        detail_url = f"{base}/swarm/runs/{run_id}"
+        while True:
+            poll_req = urllib.request.Request(
+                detail_url, headers=headers, method="GET"
+            )
+            with urllib.request.urlopen(poll_req, timeout=per_request_timeout) as resp:
+                detail = json.loads(resp.read().decode("utf-8"))
+            status = str(detail.get("status") or "").strip().lower()
+            report = detail.get("final_report")
+            if isinstance(report, str) and report.strip():
+                final_report = report
+            if status in _SWARM_TERMINAL_STATUSES:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(2.0)
+
+        return {
+            "preset_name": preset_name,
+            "run_id": run_id,
+            "status": status,
+            "report": final_report,
+        }
+    except Exception as exc:
+        print(f"vibe-trading swarm skipped ({preset_name}): {exc}", flush=True)
+        return None
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -578,6 +715,21 @@ class PokeBridgeService:
                     "message": proposal_payload["proposal_text"],
                 }
 
+            # Tier A/B/C research routing: enrich the proposal by confidence.
+            # Tier B/C may call the vibe-trading swarm (best-effort, silent on
+            # failure). Price data + Poke thesis + PatternTool are always
+            # included from the candidate metadata (no extra network call).
+            research_package = self._build_research_package(
+                symbol=candidate["symbol"],
+                confidence=confidence,
+                candidate_metadata=candidate.get("metadata"),
+            )
+            print(
+                f"research routing: {handoff_id} tier={research_package['research_tier']} "
+                f"vibe_preset={research_package.get('vibe_trading_preset') or 'none'}",
+                flush=True,
+            )
+
             client = SonnetProposalClient()
             proposal_result = client.propose(
                 {
@@ -592,6 +744,7 @@ class PokeBridgeService:
                         "handoff_id": handoff_id,
                         "run_id": handoff.get("run_id", ""),
                         "source": "poke_mcp_server",
+                        "research_package": research_package,
                     },
                 }
             )
@@ -1202,6 +1355,169 @@ class PokeBridgeService:
             ),
         }
 
+    def inject_researched_candidate(
+        self,
+        symbol: str,
+        thesis: str,
+        confidence: float,
+        trigger_reason: str,
+        direction: str,
+    ) -> dict[str, Any]:
+        """Queue a Poke-researched candidate (Tier 1 → Tier 2 handoff).
+
+        Poke calls this AFTER doing its own free web research. The supplied
+        confidence is trusted as-is: Poke-injected candidates BYPASS composite
+        scoring entirely (see market_feed.composite_confidence). The circuit
+        breaker is checked before queuing; a tripped breaker blocks injection.
+        Writes to the same overnight poke queue the scheduler uses.
+        """
+        symbol = str(symbol or "").strip().upper()
+        direction = str(direction or "").strip().lower()
+        thesis = str(thesis or "").strip()
+        trigger_reason = str(trigger_reason or "").strip()
+
+        universe = frozenset(market_feed_module.ALL_SYMBOLS)
+        if symbol not in universe:
+            return {"queued": False, "error": f"symbol {symbol!r} not in ticker universe"}
+        if direction not in {"buy", "sell"}:
+            return {
+                "queued": False,
+                "error": f"direction must be buy/sell, got {direction!r}",
+            }
+        try:
+            confidence_val = float(confidence)
+        except (TypeError, ValueError):
+            return {"queued": False, "error": "confidence must be a number"}
+        if not (0.0 <= confidence_val <= 1.0):
+            return {"queued": False, "error": "confidence must be within [0, 1]"}
+
+        # Circuit breaker gate — fail closed. A tripped breaker blocks queuing so
+        # nothing unsafe ever reaches Sonnet.
+        observations = build_observations(symbol)
+        cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
+        cb_result = evaluate_circuit_breaker(cb_config, observations)
+        if cb_result.blocked:
+            return {
+                "queued": False,
+                "error": "circuit breaker tripped: " + cb_result.reason,
+                "circuit_breaker": _circuit_breaker_payload(
+                    cb_result, config_error=cb_config_error
+                ),
+            }
+
+        # Build the candidate + handoff directly so Poke's thesis and confidence
+        # are preserved verbatim (no composite re-scoring).
+        # TODO(pydantic-schemas): validate PokeBridgeHandoff with Pydantic v2 here
+        session_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+        created_at = _utc_now_iso()
+        run_id = f"poke-research-{session_date}"
+        uid = uuid.uuid4().hex[:12]
+        candidate_event_id = f"{run_id}-candidate-{uid}"
+        handoff_id = f"{run_id}-handoff-{uid}"
+        handoff_metadata = {
+            "symbol": symbol,
+            "side": direction,
+            "confidence": confidence_val,
+            "thesis": thesis,
+            "trigger_reason": trigger_reason,
+            "source": "poke_research",
+            "direction": direction,
+        }
+
+        try:
+            writer = OvernightArtifactWriter(
+                session_id=f"research-{session_date}",
+                artifact_root=self.overnight_root,
+            )
+            writer.write_candidate(
+                CandidateEvent(
+                    event_id=candidate_event_id,
+                    run_id=run_id,
+                    created_at=created_at,
+                    symbol=symbol,
+                    side=direction,
+                    confidence=confidence_val,
+                    source="poke_research",
+                    strategy="poke_research",
+                    dry_run=True,
+                    metadata=dict(handoff_metadata),
+                )
+            )
+            enqueued = writer.enqueue_poke_handoff(
+                PokeBridgeHandoff(
+                    handoff_id=handoff_id,
+                    run_id=run_id,
+                    created_at=created_at,
+                    candidate_event_id=candidate_event_id,
+                    destination="poke_bridge_local_queue",
+                    dry_run=True,
+                    metadata=dict(handoff_metadata),
+                )
+            )
+        except Exception as exc:
+            return {"queued": False, "error": f"queue write failed: {exc}"}
+
+        if not enqueued:
+            return {"queued": False, "error": "handoff failed local schema validation"}
+
+        print(
+            f"poke research injected: {handoff_id} {symbol} {direction} "
+            f"confidence={confidence_val} (composite bypassed)",
+            flush=True,
+        )
+        return {
+            "queued": True,
+            "candidate_id": handoff_id,
+            "handoff_id": handoff_id,
+            "symbol": symbol,
+            "direction": direction,
+            "confidence": confidence_val,
+            "source": "poke_research",
+            "message": (
+                f"Queued Poke-researched {symbol} {direction} candidate "
+                f"(confidence={confidence_val}) handoff_id={handoff_id}"
+            ),
+        }
+
+    def _build_research_package(
+        self,
+        *,
+        symbol: str,
+        confidence: float,
+        candidate_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the Tier 2 research context attached to the Sonnet proposal.
+
+        Always includes price data (read from candidate metadata — no extra
+        network call), the Poke thesis if present, and PatternTool triggers.
+        Tier B adds the technical_analysis_panel swarm; Tier C adds the
+        investment_committee swarm. vibe-trading is best-effort and skipped
+        silently on any failure.
+        """
+        metadata = candidate_metadata if isinstance(candidate_metadata, dict) else {}
+        package: dict[str, Any] = {
+            "symbol": symbol,
+            "confidence": confidence,
+            "research_tier": _research_tier_label(confidence),
+            "poke_thesis": str(metadata.get("thesis") or "").strip(),
+            "trigger_reason": str(metadata.get("trigger_reason") or "").strip(),
+            "price_data": {
+                key: metadata.get(key)
+                for key in ("latest_price", "price_move_pct", "volume_ratio")
+                if metadata.get(key) is not None
+            },
+            "pattern": metadata.get("trigger_reasons") or metadata.get("pattern"),
+            "vibe_trading_preset": None,
+            "vibe_trading": None,
+        }
+        preset = _select_research_preset(confidence)
+        if preset is not None:
+            package["vibe_trading_preset"] = preset
+            package["vibe_trading"] = call_vibe_trading_swarm(
+                preset, _swarm_user_vars(preset, symbol)
+            )
+        return package
+
     def get_market_overview(self) -> dict[str, Any]:
         """Return current price, % change, and volume ratio for all watched tickers."""
         symbols = list(market_feed_module.WATCH_SYMBOLS)
@@ -1365,6 +1681,22 @@ def get_market_overview() -> dict[str, Any]:
     return SERVICE.get_market_overview()
 
 
+def inject_researched_candidate(
+    symbol: str,
+    thesis: str,
+    confidence: float,
+    trigger_reason: str,
+    direction: str,
+) -> dict[str, Any]:
+    return SERVICE.inject_researched_candidate(
+        symbol=symbol,
+        thesis=thesis,
+        confidence=confidence,
+        trigger_reason=trigger_reason,
+        direction=direction,
+    )
+
+
 def build_mcp_app():
     """Build the MCP app lazily so offline imports do not require mcp."""
     try:
@@ -1382,6 +1714,7 @@ def build_mcp_app():
     app.tool()(get_daily_report)
     app.tool()(research_and_surface_candidates)
     app.tool()(get_market_overview)
+    app.tool()(inject_researched_candidate)
     return app
 
 

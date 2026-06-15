@@ -57,14 +57,100 @@ def _load_candlestick_patterns():
         return None
 
 
-WATCH_SYMBOLS = (
-    "NVDA", "MU", "AMD", "TSLA", "META", "GOOGL",
-    "AMZN", "AAPL", "MSFT", "PLTR", "ARM", "SMCI",
-    # Crypto disabled pending Alpaca account enablement
-    # "BTC/USD", "SOL/USD",
+# ---------------------------------------------------------------------------
+# Ticker universe (priority tiers)
+#
+# Signal generation here is deliberately model-free: yfinance price/volume +
+# the deterministic PatternTool only. There is NO AutoHedge LLM agent
+# (Director/Quant/Risk) wiring in this signal flow — Poke does free web
+# research at Tier 1 instead. This module must never import or call those
+# agents; broker/audit/circuit-breaker imports live elsewhere.
+# ---------------------------------------------------------------------------
+
+# Auto-pinged on a >2% move OR >1.5x 20-day average volume.
+HIGH_PRIORITY = ("NVDA", "MU", "AMD", "TSLA")
+
+# Auto-pinged on a >3% move OR >2x 20-day average volume.
+MEDIUM_PRIORITY = ("META", "GOOGL", "AMZN", "AAPL", "MSFT", "PLTR", "ARM", "SMCI")
+
+# yfinance + PatternTool only — never auto-pinged (cost saving). Poke can still
+# call inject_researched_candidate manually for any of these.
+WATCH_ONLY = (
+    "NFLX", "AVGO", "QCOM", "ASML", "MCHP", "MRVL", "CRM", "ADBE",
+    "SNOW", "CRWD", "OKTA", "DDOG", "CRDO", "RBLX", "SOUN", "IONQ",
+    "MSTR", "COIN", "HOOD", "SOFI", "UPST", "AFRM", "NU", "SHOP",
+    "SPOT", "UBER", "LYFT", "NET", "BILL", "PATH",
 )
-PRICE_MOVE_THRESHOLD = 0.02
-VOLUME_MULTIPLIER_THRESHOLD = 1.5
+
+# Actively auto-pinged universe (HIGH + MEDIUM). Kept named WATCH_SYMBOLS for
+# backwards compatibility with the market overview / research tools.
+WATCH_SYMBOLS = HIGH_PRIORITY + MEDIUM_PRIORITY
+
+# Full universe valid for Poke manual injection (HIGH + MEDIUM + WATCH_ONLY).
+ALL_SYMBOLS = HIGH_PRIORITY + MEDIUM_PRIORITY + WATCH_ONLY
+
+# Per-tier auto-ping thresholds. WATCH_ONLY is intentionally absent: it is
+# scanned for data only and never produces an auto-ping candidate.
+TIER_THRESHOLDS: dict[str, dict[str, float]] = {
+    "high": {"price_move": 0.02, "volume": 1.5},
+    "medium": {"price_move": 0.03, "volume": 2.0},
+}
+
+# Composite confidence weights (scheduler-generated candidates only).
+COMPOSITE_BASE = 0.40
+COMPOSITE_PRICE_MOVE_WEIGHT = 0.15
+COMPOSITE_VOLUME_WEIGHT = 0.10
+COMPOSITE_PATTERN_WEIGHT = 0.10
+COMPOSITE_POKE_RESEARCH_WEIGHT = 0.25
+COMPOSITE_SURFACE_THRESHOLD = 0.80
+
+# Legacy aliases retained so any external reference keeps resolving.
+PRICE_MOVE_THRESHOLD = TIER_THRESHOLDS["high"]["price_move"]
+VOLUME_MULTIPLIER_THRESHOLD = TIER_THRESHOLDS["high"]["volume"]
+
+
+def priority_tier(symbol: str) -> str | None:
+    """Return the priority tier for a symbol: high/medium/watch_only/None."""
+    sym = str(symbol or "").strip().upper()
+    if sym in HIGH_PRIORITY:
+        return "high"
+    if sym in MEDIUM_PRIORITY:
+        return "medium"
+    if sym in WATCH_ONLY:
+        return "watch_only"
+    return None
+
+
+def composite_confidence(
+    *,
+    price_move_ok: bool,
+    volume_ok: bool,
+    pattern_ok: bool,
+    source: str = "",
+) -> float:
+    """Composite confidence score for SCHEDULER-GENERATED candidates only.
+
+    Base 0.40, plus weighted boosts for the price-move, volume, and PatternTool
+    confirmations. Capped at 1.0; only candidates >= COMPOSITE_SURFACE_THRESHOLD
+    (0.80) reach Sonnet downstream.
+
+    Poke-injected candidates (source == "poke_research") BYPASS this function
+    entirely — their confidence is set by Poke after free web research and must
+    never be recomputed here. The +0.25 poke_research branch below is therefore
+    never reached via the scheduler path; it is left as explicit documentation
+    that injected candidates skip composite scoring.
+    """
+    score = COMPOSITE_BASE
+    if price_move_ok:
+        score += COMPOSITE_PRICE_MOVE_WEIGHT
+    if volume_ok:
+        score += COMPOSITE_VOLUME_WEIGHT
+    if pattern_ok:
+        score += COMPOSITE_PATTERN_WEIGHT
+    if source == "poke_research":
+        # Unreachable via the scheduler: injected candidates never call this.
+        score += COMPOSITE_POKE_RESEARCH_WEIGHT
+    return round(min(score, 1.0), 4)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -132,6 +218,15 @@ def _build_candidate(
 
 
 def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
+    # Tier gates the auto-ping thresholds. WATCH_ONLY (and anything off-universe)
+    # never produces an auto-ping candidate — those are manual-injection only.
+    tier = priority_tier(symbol)
+    thresholds = TIER_THRESHOLDS.get(tier or "")
+    if thresholds is None:
+        return None
+    price_move_threshold = thresholds["price_move"]
+    volume_threshold = thresholds["volume"]
+
     ticker = yf.Ticker(symbol)
     hourly = ticker.history(period="2d", interval="60m", auto_adjust=False)
     closes = _series_values(hourly, "Close")
@@ -146,10 +241,12 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
     price_move = (latest_close - previous_close) / previous_close
     side = "buy" if price_move >= 0 else "sell"
     trigger_reasons: list[str] = []
-    if abs(price_move) > PRICE_MOVE_THRESHOLD:
+    price_move_ok = abs(price_move) > price_move_threshold
+    if price_move_ok:
         trigger_reasons.append("price_move_1h")
 
     # Technical pattern detection (optional — skipped if PatternTool unavailable)
+    pattern_ok = False
     try:
         candlestick_fn = _load_candlestick_patterns()
         if candlestick_fn is not None and len(closes) >= 5:
@@ -158,14 +255,17 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
             latest_pattern = patterns.iloc[-1]
             if latest_pattern == 1 and side == "buy":
                 trigger_reasons.append("bullish_candlestick")
+                pattern_ok = True
             elif latest_pattern == -1 and side == "sell":
                 trigger_reasons.append("bearish_candlestick")
+                pattern_ok = True
     except Exception:
         pass
 
     latest_volume = None
     average_volume = None
     volume_ratio = None
+    volume_ok = False
     try:
         daily = ticker.history(period="30d", interval="1d", auto_adjust=False)
         daily_volumes = _series_values(daily, "Volume")
@@ -174,7 +274,8 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
             average_volume = _average_positive(daily_volumes[-21:-1] or daily_volumes[:-1])
             if average_volume and average_volume > 0 and latest_volume is not None:
                 volume_ratio = latest_volume / average_volume
-                if volume_ratio > VOLUME_MULTIPLIER_THRESHOLD:
+                if volume_ratio > volume_threshold:
+                    volume_ok = True
                     trigger_reasons.append("volume_spike_20d")
     except Exception:
         latest_volume = None
@@ -184,14 +285,14 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
     if not trigger_reasons:
         return None
 
-    confidence = 0.55 + min(abs(price_move) * 4.0, 0.25)
-
-    # Adjust confidence for technical patterns
-    if "bullish_candlestick" in trigger_reasons or "bearish_candlestick" in trigger_reasons:
-        confidence += 0.10
-
-    if volume_ratio is not None and volume_ratio > VOLUME_MULTIPLIER_THRESHOLD:
-        confidence += min((volume_ratio - VOLUME_MULTIPLIER_THRESHOLD) * 0.08, 0.15)
+    # Composite confidence (scheduler path). Poke-injected candidates skip this
+    # entirely and carry Poke's own confidence — see composite_confidence().
+    confidence = composite_confidence(
+        price_move_ok=price_move_ok,
+        volume_ok=volume_ok,
+        pattern_ok=pattern_ok,
+        source="yfinance_market_feed",
+    )
 
     return _build_candidate(
         symbol=symbol,
@@ -209,6 +310,10 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
 
 def fetch_candidates() -> list[dict[str, Any]]:
     """Fetch dry-run watcher candidates from yfinance.
+
+    Scans only the auto-ping universe (HIGH + MEDIUM). WATCH_ONLY tickers are
+    never auto-scanned here (cost saving); they reach the pipeline only through
+    Poke's manual inject_researched_candidate.
 
     This function is intentionally fail-closed: any yfinance/import/data error
     returns an empty candidate list and never reaches broker APIs.
