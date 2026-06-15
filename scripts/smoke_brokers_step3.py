@@ -313,13 +313,13 @@ def main() -> None:
                 side="buy",
                 quantity=1.0,
                 order_type="limit",
-                limit_price=100.0,
+                limit_price=1.0,
                 created_at="2026-05-31T04:00:09Z",
                 dry_run=False,
                 approved=True,
                 approved_by="smoke-test",
                 approved_at="2026-05-31T04:00:09Z",
-                metadata={"estimated_price": 100.0},
+                metadata={"estimated_price": 1.0},
             )
             fill = live_broker.submit_order(live_intent)
             assert fill.status == "accepted"
@@ -343,7 +343,7 @@ def main() -> None:
                 side="buy",
                 quantity=3.0,
                 order_type="limit",
-                limit_price=100.0,
+                limit_price=5.0,
                 created_at="2026-05-31T04:00:11Z",
                 dry_run=False,
                 approved=True,
@@ -352,7 +352,7 @@ def main() -> None:
             )
             _expect_value_error(
                 lambda: live_broker.submit_order(too_large),
-                includes="exceeds hard $200 cap",
+                includes="exceeds hard $10 cap",
             )
             assert len(submissions) == 1
     finally:

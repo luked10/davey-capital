@@ -29,7 +29,7 @@ from contracts.bridge_contract import (
 )
 
 
-MAX_ORDER_NOTIONAL_USD = 200.0
+MAX_ORDER_NOTIONAL_USD = 10.0  # Live account balance ~$20, cap set to $10 per order
 ALPACA_PAPER_URL = "https://paper-api.alpaca.markets"
 ALPACA_LIVE_URL = "https://api.alpaca.markets"
 
