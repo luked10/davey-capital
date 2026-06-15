@@ -4,7 +4,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.tools.pattern_tool import candlestick_patterns
+def _load_candlestick_patterns():
+    """Lazily load candlestick_patterns from vibe-trading/agent/src/tools/pattern_tool.py.
+
+    Returns None if the file is absent or fails to load — callers must handle None.
+    """
+    import importlib.util
+    import os
+
+    path = os.path.normpath(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "../../../vibe-trading/agent/src/tools/pattern_tool.py",
+        )
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("pattern_tool", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, "candlestick_patterns", None)
+    except Exception as exc:
+        print(f"PatternTool unavailable: {exc}", flush=True)
+        return None
 
 
 WATCH_SYMBOLS = (
@@ -99,12 +122,12 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
     if abs(price_move) > PRICE_MOVE_THRESHOLD:
         trigger_reasons.append("price_move_1h")
 
-    # Technical pattern detection
+    # Technical pattern detection (optional — skipped if PatternTool unavailable)
     try:
-        # Use 5 periods for pattern context if available
-        if len(closes) >= 5:
+        candlestick_fn = _load_candlestick_patterns()
+        if candlestick_fn is not None and len(closes) >= 5:
             df = hourly.tail(5).copy()
-            patterns = candlestick_patterns(df["Open"], df["High"], df["Low"], df["Close"])
+            patterns = candlestick_fn(df["Open"], df["High"], df["Low"], df["Close"])
             latest_pattern = patterns.iloc[-1]
             if latest_pattern == 1 and side == "buy":
                 trigger_reasons.append("bullish_candlestick")
