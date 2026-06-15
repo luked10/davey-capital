@@ -284,7 +284,6 @@ class PokeBridgeService:
         self.repo_root = Path(repo_root)
         self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposal_store = ProposalStore(davey_root=self.repo_root)
-        self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
         try:
             existing = self.proposal_store.count_proposals()
         except Exception as exc:
@@ -301,8 +300,7 @@ class PokeBridgeService:
         )
 
     def _forget_proposal(self, handoff_id: str) -> None:
-        """Drop a resolved proposal from memory and the persistent store."""
-        self.proposals_by_handoff.pop(handoff_id, None)
+        """Remove a resolved proposal from the persistent store."""
         self.proposal_store.delete_proposal(handoff_id)
 
     @property
@@ -430,11 +428,15 @@ class PokeBridgeService:
                         rationale=cb_rationale,
                     ),
                 }
-                # Persist a needs_human marker so we can confirm the path was
-                # hit from fly logs / the DB even though there is no intent to
-                # execute. record_approval_decision treats an empty intent as
-                # not-executable.
-                self.proposal_store.save_proposal(handoff_id, {}, cb_rationale)
+                # Persist a needs_human marker so fly logs / DB confirm the path
+                # was reached. intent_json=None signals no executable intent.
+                self.proposal_store.save_proposal(
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=None,
+                )
                 print(
                     f"proposal saved to db: {handoff_id} "
                     "(needs_human=circuit_breaker)",
@@ -499,8 +501,14 @@ class PokeBridgeService:
                     ),
                 }
                 # Persist a needs_human marker for the low-confidence path so
-                # the path's reach is visible in the DB and fly logs.
-                self.proposal_store.save_proposal(handoff_id, {}, reason_str)
+                # the path's reach is visible in the DB / fly logs.
+                self.proposal_store.save_proposal(
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=None,
+                )
                 print(
                     f"proposal saved to db: {handoff_id} "
                     "(needs_human=low_confidence)",
@@ -580,17 +588,14 @@ class PokeBridgeService:
                         rationale=rationale,
                     ),
                 }
-                self.proposals_by_handoff[handoff_id] = {
-                    "intent": intent,
-                    "session_id": session_id,
-                    "candidate": candidate,
-                    "proposal": proposal_payload,
-                }
-                # Persist so the approval survives a Fly machine restart.
+                # Persist the full proposal so record_approval_decision can
+                # reconstruct the intent after a Fly machine restart.
                 self.proposal_store.save_proposal(
-                    handoff_id,
-                    audit_module.to_dict(intent),
-                    rationale,
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=json.dumps(audit_module.to_dict(intent)),
                 )
                 print(
                     f"proposal saved to db: {handoff_id} "
@@ -620,9 +625,24 @@ class PokeBridgeService:
                         rationale=rationale,
                     ),
                 }
-                # Persist a needs_human marker so the Sonnet-failure path is
-                # visible from the DB / fly logs.
-                self.proposal_store.save_proposal(handoff_id, {}, rationale)
+                # Persist a needs_human marker (no executable intent) so the
+                # Sonnet-failure path is visible in fly logs / DB.  Try to
+                # recover an intent from the raw output as a best-effort; if
+                # it can't be parsed intent_json stays None.
+                recovered_intent_json: str | None = None
+                try:
+                    raw_intent_dict = json.loads(proposal_result.raw)
+                    recovered_intent_json = json.dumps(raw_intent_dict)
+                except (ValueError, TypeError):
+                    pass
+
+                self.proposal_store.save_proposal(
+                    handoff_id=handoff_id,
+                    session_id=session_id,
+                    candidate=candidate,
+                    proposal_payload=proposal_payload,
+                    intent_json=recovered_intent_json,
+                )
                 print(
                     f"proposal saved to db: {handoff_id} "
                     "(needs_human=sonnet_error)",
@@ -725,40 +745,29 @@ class PokeBridgeService:
             provider="poke_mcp",
         )
 
-        # Prefer the in-memory proposal (fast path within one process); fall
-        # back to the persistent store so an approval still resolves after a Fly
-        # machine restart wiped the in-memory dict.
-        proposed_intent: ExecutionIntent | None = None
-        persisted_needs_human = False
-        proposal = self.proposals_by_handoff.get(handoff_id)
-        if proposal is not None and isinstance(proposal.get("intent"), ExecutionIntent):
-            proposed_intent = proposal["intent"]
-        else:
-            stored = self.proposal_store.get_proposal(handoff_id)
-            if stored is not None and isinstance(stored.get("intent"), dict):
-                stored_intent = stored["intent"]
-                if not stored_intent:
-                    # Persisted needs_human marker — DB confirms the path was
-                    # reached but there is no executable intent to approve.
-                    persisted_needs_human = True
-                else:
-                    try:
-                        proposed_intent = execution_intent_from_dict(stored_intent)
-                    except (TypeError, ValueError):
-                        proposed_intent = None
-
+        # Read proposal from the persistent store (survives Fly machine restarts).
+        # A persisted marker with intent_json=None means needs_human — there is
+        # no executable intent and we should surface a clear message rather than
+        # the generic "proposal expired or not found".
+        proposal = self.proposal_store.get_proposal(handoff_id)
         intent_id = ""
         if approved:
+            proposed_intent: ExecutionIntent | None = None
+            persisted_needs_human = proposal is not None and not proposal.get("intent_json")
+            if proposal and proposal.get("intent_json"):
+                try:
+                    intent_dict = json.loads(proposal["intent_json"])
+                    proposed_intent = execution_intent_from_dict(intent_dict)
+                except (ValueError, TypeError):
+                    proposed_intent = None
+
             if proposed_intent is None:
-                if persisted_needs_human:
-                    reason_text = (
-                        "approval requested but the proposal was flagged "
-                        "needs_human and has no executable intent"
-                    )
-                else:
-                    reason_text = (
-                        "approval requested but no validated proposal is available"
-                    )
+                reason_text = (
+                    "approval requested but the proposal was flagged "
+                    "needs_human and has no executable intent"
+                    if persisted_needs_human
+                    else "approval requested but no validated proposal is available"
+                )
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
                     approved=False,
@@ -774,6 +783,7 @@ class PokeBridgeService:
                     f"Approval for {handoff_id} blocked: proposal expired or not "
                     "found, please re-triage. No intent artifact written."
                 )
+
             live_mode = _live_mode_enabled()
             approved_intent = replace(
                 proposed_intent,

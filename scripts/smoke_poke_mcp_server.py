@@ -20,6 +20,7 @@ SERVER_PATH = REPO_ROOT / "mcp_server" / "server.py"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from dataclasses import asdict
 from contracts.bridge_contract import ExecutionIntent
 
 
@@ -167,11 +168,12 @@ def main() -> None:
         assert blocked["proposal"]["intent"] is None
         assert blocked["proposal"]["circuit_breaker"]["blocked"] is True
         # Circuit-breaker path must persist a needs_human marker so the path's
-        # reach is visible in the DB / fly logs.
+        # reach is visible in the DB / fly logs. intent_json=None means no
+        # executable intent; rationale lives in proposal_payload.
         cb_stored = service.proposal_store.get_proposal("handoff-0002")
         assert cb_stored is not None
-        assert cb_stored["intent"] == {}
-        assert "Circuit breaker requires human review" in cb_stored["rationale"]
+        assert cb_stored["intent_json"] is None
+        assert "Circuit breaker requires human review" in cb_stored["proposal_payload"]["rationale"]
 
         cb_path = root / "logs" / "audit" / "smoke-session" / "decision-circuit-breaker-handoff-0002.json"
         cb_payload = json.loads(cb_path.read_text(encoding="utf-8"))
@@ -226,8 +228,8 @@ def main() -> None:
         # Low-confidence path must also persist a needs_human marker.
         low_stored = service.proposal_store.get_proposal("handoff-low-conf")
         assert low_stored is not None
-        assert low_stored["intent"] == {}
-        assert "Auto-skipped: confidence 0.75" in low_stored["rationale"]
+        assert low_stored["intent_json"] is None
+        assert "Auto-skipped: confidence 0.75" in low_stored["proposal_payload"]["rationale"]
 
         # Approval of a persisted needs_human marker must surface the clearer
         # "needs_human, no executable intent" message instead of the misleading
@@ -303,23 +305,25 @@ def main() -> None:
         )
         previous_live_mode = os.environ.pop("DAVEY_LIVE_MODE", None)
         try:
-            service.proposals_by_handoff["handoff-0003"] = {
-                "intent": ExecutionIntent(
-                    intent_id="intent-live-forced-dry-run",
-                    signal_id="candidate-0003",
-                    broker="alpaca",
-                    symbol="NVDA",
-                    side="buy",
-                    quantity=1.0,
-                    created_at="2026-06-12T00:02:01Z",
-                    dry_run=False,
-                    approved=False,
-                    metadata={"estimated_price": 100.0},
-                ),
-                "session_id": "smoke-session",
-                "candidate": {},
-                "proposal": {},
-            }
+            forced_dry_intent = ExecutionIntent(
+                intent_id="intent-live-forced-dry-run",
+                signal_id="candidate-0003",
+                broker="alpaca",
+                symbol="NVDA",
+                side="buy",
+                quantity=1.0,
+                created_at="2026-06-12T00:02:01Z",
+                dry_run=False,
+                approved=False,
+                metadata={"estimated_price": 100.0},
+            )
+            service.proposal_store.save_proposal(
+                handoff_id="handoff-0003",
+                session_id="smoke-session",
+                candidate={},
+                proposal_payload={},
+                intent_json=json.dumps(asdict(forced_dry_intent)),
+            )
             approval = service.record_approval_decision(
                 handoff_id="handoff-0003",
                 approved=True,
