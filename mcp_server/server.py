@@ -285,6 +285,20 @@ class PokeBridgeService:
         self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposal_store = ProposalStore(davey_root=self.repo_root)
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
+        try:
+            existing = self.proposal_store.count_proposals()
+        except Exception as exc:
+            existing = -1
+            print(
+                f"ProposalStore startup count failed: {exc}",
+                flush=True,
+            )
+        print(
+            f"PokeBridgeService: repo_root={self.repo_root} "
+            f"proposal_store db_path={self.proposal_store.db_path} "
+            f"existing_rows={existing}",
+            flush=True,
+        )
 
     def _forget_proposal(self, handoff_id: str) -> None:
         """Drop a resolved proposal from memory and the persistent store."""
@@ -416,6 +430,16 @@ class PokeBridgeService:
                         rationale=cb_rationale,
                     ),
                 }
+                # Persist a needs_human marker so we can confirm the path was
+                # hit from fly logs / the DB even though there is no intent to
+                # execute. record_approval_decision treats an empty intent as
+                # not-executable.
+                self.proposal_store.save_proposal(handoff_id, {}, cb_rationale)
+                print(
+                    f"proposal saved to db: {handoff_id} "
+                    "(needs_human=circuit_breaker)",
+                    flush=True,
+                )
                 writer.append_triage_decision(
                     handoff_id=handoff_id,
                     proceed=decision.proceed,
@@ -474,6 +498,14 @@ class PokeBridgeService:
                         rationale=reason_str,
                     ),
                 }
+                # Persist a needs_human marker for the low-confidence path so
+                # the path's reach is visible in the DB and fly logs.
+                self.proposal_store.save_proposal(handoff_id, {}, reason_str)
+                print(
+                    f"proposal saved to db: {handoff_id} "
+                    "(needs_human=low_confidence)",
+                    flush=True,
+                )
                 writer.append_triage_decision(
                     handoff_id=handoff_id,
                     proceed=decision.proceed,
@@ -560,6 +592,11 @@ class PokeBridgeService:
                     audit_module.to_dict(intent),
                     rationale,
                 )
+                print(
+                    f"proposal saved to db: {handoff_id} "
+                    "(sonnet_success)",
+                    flush=True,
+                )
             else:
                 rationale = (
                     proposal_result.error
@@ -583,6 +620,14 @@ class PokeBridgeService:
                         rationale=rationale,
                     ),
                 }
+                # Persist a needs_human marker so the Sonnet-failure path is
+                # visible from the DB / fly logs.
+                self.proposal_store.save_proposal(handoff_id, {}, rationale)
+                print(
+                    f"proposal saved to db: {handoff_id} "
+                    "(needs_human=sonnet_error)",
+                    flush=True,
+                )
 
         writer.append_triage_decision(
             handoff_id=handoff_id,
@@ -684,26 +729,47 @@ class PokeBridgeService:
         # back to the persistent store so an approval still resolves after a Fly
         # machine restart wiped the in-memory dict.
         proposed_intent: ExecutionIntent | None = None
+        persisted_needs_human = False
         proposal = self.proposals_by_handoff.get(handoff_id)
         if proposal is not None and isinstance(proposal.get("intent"), ExecutionIntent):
             proposed_intent = proposal["intent"]
         else:
             stored = self.proposal_store.get_proposal(handoff_id)
             if stored is not None and isinstance(stored.get("intent"), dict):
-                try:
-                    proposed_intent = execution_intent_from_dict(stored["intent"])
-                except (TypeError, ValueError):
-                    proposed_intent = None
+                stored_intent = stored["intent"]
+                if not stored_intent:
+                    # Persisted needs_human marker — DB confirms the path was
+                    # reached but there is no executable intent to approve.
+                    persisted_needs_human = True
+                else:
+                    try:
+                        proposed_intent = execution_intent_from_dict(stored_intent)
+                    except (TypeError, ValueError):
+                        proposed_intent = None
 
         intent_id = ""
         if approved:
             if proposed_intent is None:
+                if persisted_needs_human:
+                    reason_text = (
+                        "approval requested but the proposal was flagged "
+                        "needs_human and has no executable intent"
+                    )
+                else:
+                    reason_text = (
+                        "approval requested but no validated proposal is available"
+                    )
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
                     approved=False,
                     approved_by=approved_by,
-                    reason="approval requested but no validated proposal is available",
+                    reason=reason_text,
                 )
+                if persisted_needs_human:
+                    return (
+                        f"Approval for {handoff_id} blocked: proposal is "
+                        "needs_human, no executable intent. Re-triage required."
+                    )
                 return (
                     f"Approval for {handoff_id} blocked: proposal expired or not "
                     "found, please re-triage. No intent artifact written."

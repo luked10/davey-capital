@@ -90,9 +90,17 @@ class ProposalStore:
         rationale: str,
     ) -> None:
         clean_id = _clean_text(handoff_id)
+        print(
+            f"ProposalStore.save_proposal: handoff_id={clean_id!r} db={self.db_path}",
+            flush=True,
+        )
         if not clean_id:
+            print(
+                "ProposalStore.save_proposal: skipped (empty handoff_id)",
+                flush=True,
+            )
             return
-        payload = json.dumps(intent_json, ensure_ascii=False, sort_keys=True)
+        payload = json.dumps(intent_json or {}, ensure_ascii=False, sort_keys=True)
         rationale_text = _clean_text(rationale)
         with self._lock:
             self._ensure_db()
@@ -108,9 +116,21 @@ class ProposalStore:
                     """,
                     (clean_id, payload, rationale_text, _utc_now_iso()),
                 )
+                row_count = conn.execute(
+                    "SELECT COUNT(*) FROM proposals"
+                ).fetchone()[0]
+        print(
+            f"ProposalStore.save_proposal: committed handoff_id={clean_id} "
+            f"total_rows={row_count}",
+            flush=True,
+        )
 
     def get_proposal(self, handoff_id: str) -> dict[str, Any] | None:
         clean_id = _clean_text(handoff_id)
+        print(
+            f"ProposalStore.get_proposal: handoff_id={clean_id!r} db={self.db_path}",
+            flush=True,
+        )
         if not clean_id:
             return None
         with self._lock:
@@ -122,11 +142,28 @@ class ProposalStore:
                     (clean_id,),
                 ).fetchone()
         if row is None:
+            print(
+                f"ProposalStore.get_proposal: miss handoff_id={clean_id}",
+                flush=True,
+            )
             return None
+        # A corrupt intent_json must not be silently dropped — it would look
+        # identical to "not found" and mask a real persistence bug. Log and
+        # raise so the caller and the operator can see what happened.
         try:
             intent = json.loads(row[0])
-        except (json.JSONDecodeError, TypeError):
-            return None
+        except (json.JSONDecodeError, TypeError) as exc:
+            print(
+                f"ProposalStore.get_proposal: corrupt intent_json for "
+                f"handoff_id={clean_id}: {exc}",
+                flush=True,
+            )
+            raise
+        print(
+            f"ProposalStore.get_proposal: hit handoff_id={clean_id} "
+            f"intent_empty={not bool(intent)}",
+            flush=True,
+        )
         return {
             "handoff_id": clean_id,
             "intent": intent,
@@ -136,6 +173,10 @@ class ProposalStore:
 
     def delete_proposal(self, handoff_id: str) -> None:
         clean_id = _clean_text(handoff_id)
+        print(
+            f"ProposalStore.delete_proposal: handoff_id={clean_id!r} db={self.db_path}",
+            flush=True,
+        )
         if not clean_id:
             return
         with self._lock:
@@ -145,3 +186,13 @@ class ProposalStore:
                     "DELETE FROM proposals WHERE handoff_id = ?",
                     (clean_id,),
                 )
+
+    def count_proposals(self) -> int:
+        """Total rows in the proposals table (for startup diagnostics)."""
+        with self._lock:
+            self._ensure_db()
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM proposals"
+                ).fetchone()
+        return int(row[0]) if row is not None else 0

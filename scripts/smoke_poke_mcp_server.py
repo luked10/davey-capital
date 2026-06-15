@@ -166,6 +166,12 @@ def main() -> None:
         assert blocked["needs_human"] is True
         assert blocked["proposal"]["intent"] is None
         assert blocked["proposal"]["circuit_breaker"]["blocked"] is True
+        # Circuit-breaker path must persist a needs_human marker so the path's
+        # reach is visible in the DB / fly logs.
+        cb_stored = service.proposal_store.get_proposal("handoff-0002")
+        assert cb_stored is not None
+        assert cb_stored["intent"] == {}
+        assert "Circuit breaker requires human review" in cb_stored["rationale"]
 
         cb_path = root / "logs" / "audit" / "smoke-session" / "decision-circuit-breaker-handoff-0002.json"
         cb_payload = json.loads(cb_path.read_text(encoding="utf-8"))
@@ -217,6 +223,22 @@ def main() -> None:
             in low_conf_result["proposal"]["error"]
         )
         assert low_conf_result["proposal"]["rationale"]
+        # Low-confidence path must also persist a needs_human marker.
+        low_stored = service.proposal_store.get_proposal("handoff-low-conf")
+        assert low_stored is not None
+        assert low_stored["intent"] == {}
+        assert "Auto-skipped: confidence 0.75" in low_stored["rationale"]
+
+        # Approval of a persisted needs_human marker must surface the clearer
+        # "needs_human, no executable intent" message instead of the misleading
+        # "proposal expired or not found".
+        needs_human_approval = service.record_approval_decision(
+            handoff_id="handoff-low-conf",
+            approved=True,
+            approved_by="smoke-test",
+        )
+        assert "needs_human" in needs_human_approval
+        assert "no executable intent" in needs_human_approval
 
         status = service.get_system_status()
         assert status["active_broker"] == "paper"
