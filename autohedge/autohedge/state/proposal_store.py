@@ -32,12 +32,24 @@ def _warn(message: str) -> None:
 class ProposalStore:
     """SQLite-backed proposal store to persist trade intents across server restarts."""
 
+    _instance = None
+    _initialized_global = False
+    _fallback_proposals: dict[str, dict[str, Any]] = {}
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ProposalStore, cls).__new__(cls)
+        return cls._instance
+
     def __init__(
         self,
         *,
         davey_root: str | Path | None = None,
         db_path: str | Path | None = None,
     ) -> None:
+        if ProposalStore._initialized_global:
+            return
+            
         root = (
             Path(davey_root).expanduser().resolve()
             if davey_root is not None
@@ -54,11 +66,11 @@ class ProposalStore:
             else root / "state" / "proposals.db"
         )
         self._lock = Lock()
-        self._fallback_proposals: dict[str, dict[str, Any]] = {}
         self._db_available = True
         self._initialized = False
         self._warned_fallback = False
         self._ensure_db()
+        ProposalStore._initialized_global = True
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,8 +110,8 @@ class ProposalStore:
         intent_json: str | None = None,
     ) -> None:
         with self._lock:
-            # Always update fallback
-            self._fallback_proposals[handoff_id] = {
+            # Always update global fallback
+            ProposalStore._fallback_proposals[handoff_id] = {
                 "session_id": session_id,
                 "candidate": candidate,
                 "proposal_payload": proposal_payload,
@@ -154,5 +166,5 @@ class ProposalStore:
                     self._db_available = False
                     _warn(f"Lookup failed: {exc}")
             
-            # Fallback to in-memory
-            return self._fallback_proposals.get(handoff_id)
+            # Fallback to global in-memory
+            return ProposalStore._fallback_proposals.get(handoff_id)
