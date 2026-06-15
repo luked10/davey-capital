@@ -172,6 +172,48 @@ def main() -> None:
         assert cb_payload["decision"] == "blocked"
         assert cb_payload["context"]["circuit_breaker"]["blocked"] is True
 
+        # E) Confidence threshold enforcement
+        (root / "circuit_breaker_config.json").write_text(
+            json.dumps(
+                {
+                    "enabled": False,
+                    "max_consecutive_losses": 5,
+                    "max_daily_loss_pct": 0.05,
+                    "max_open_trades": 5,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        _write_jsonl(
+            queue_path,
+            [
+                {
+                    "handoff_id": "handoff-low-conf",
+                    "run_id": "run-0004",
+                    "created_at": "2026-06-12T00:03:00Z",
+                    "candidate_event_id": "candidate-low-conf",
+                    "destination": "poke_bridge_local_queue",
+                    "dry_run": True,
+                    "metadata": {
+                        "symbol": "NVDA",
+                        "side": "buy",
+                        "confidence": 0.75,
+                    },
+                }
+            ],
+        )
+        service.get_pending_candidates()
+        low_conf_result = service.submit_triage_decision(
+            handoff_id="handoff-low-conf",
+            proceed=True,
+            reason="manual smoke proceed on low conf",
+        )
+        assert low_conf_result["status"] == "proposal_needs_human"
+        assert low_conf_result["needs_human"] is True
+        assert low_conf_result["proposal"]["intent"] is None
+        assert "Confidence 0.75 below 0.80 threshold" in low_conf_result["proposal"]["error"]
+
         status = service.get_system_status()
         assert status["active_broker"] == "paper"
         assert status["dry_run"] is True

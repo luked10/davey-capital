@@ -8,7 +8,7 @@ for Alpaca paper trading. Real-money routing additionally requires
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 import importlib.util
 import json
@@ -24,6 +24,7 @@ from contracts.bridge_contract import (
     FillRecord,
     execution_intent_to_broker_order,
     validate_execution_intent,
+    symbol_normalize,
 )
 
 
@@ -224,6 +225,7 @@ class AlpacaLiveBroker:
         """Submit an approved non-dry-run intent to Alpaca paper/live trading."""
         order_payload: dict[str, Any] = {}
         try:
+            intent = replace(intent, symbol=symbol_normalize(intent.symbol))
             order_payload, notional = self._validate_for_submission(intent)
             order = BrokerOrderAgent(
                 symbol=str(order_payload["symbol"]),

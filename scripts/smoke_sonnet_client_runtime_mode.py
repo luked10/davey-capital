@@ -90,7 +90,16 @@ def main() -> None:
             _base_payload(dry_run=False, metadata={})
         ).propose({"symbol": "NVDA"})
         assert missing_rationale.intent is None
-        assert "rationale" in missing_rationale.error
+        assert "Model returned empty rationale, proposal rejected" in missing_rationale.error
+
+        for bad_rat in ("", "N/A", "none", "null", "  none  "):
+            bad_rat_client = FakeClient(
+                _base_payload(dry_run=False, metadata={"rationale": bad_rat})
+            )
+            bad_rat_res = bad_rat_client.propose({"symbol": "NVDA"})
+            assert bad_rat_res.intent is None
+            assert "Model returned empty rationale, proposal rejected" in bad_rat_res.error
+
     finally:
         if previous_live_mode is None:
             os.environ.pop("DAVEY_LIVE_MODE", None)

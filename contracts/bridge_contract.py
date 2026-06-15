@@ -291,6 +291,23 @@ def validate_execution_intent(
     )
 
 
+def symbol_normalize(symbol: str) -> str:
+    known_cryptos = {"SOL", "BTC", "ETH", "DOGE", "AVAX", "MATIC"}
+    known_equities = {"NVDA", "MU"}
+    
+    cleaned = symbol.strip().upper()
+    if cleaned in known_equities:
+        return symbol
+        
+    for crypto in known_cryptos:
+        if cleaned == f"{crypto}-USD" or cleaned == f"{crypto}/USD":
+            return f"{crypto}/USD"
+            
+    import logging
+    logging.warning(f"Unknown symbol encountered: {symbol}")
+    return symbol
+
+
 def execution_intent_to_broker_order(
     intent: ExecutionIntent,
     risk: RiskSummary | None = None,
@@ -300,7 +317,7 @@ def execution_intent_to_broker_order(
     normalized = validation.require_allowed()
     asset_class = _clean_text(normalized.metadata.get("asset_class")) or "stock"
     return {
-        "symbol": normalized.symbol,
+        "symbol": symbol_normalize(normalized.symbol),
         "side": normalized.side,
         "quantity": float(normalized.quantity),
         "order_type": normalized.order_type,

@@ -383,8 +383,18 @@ def _proposal_schema_error(intent: ExecutionIntent, *, live_mode: bool) -> str:
 
     metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
     rationale = metadata.get("rationale")
-    if not isinstance(rationale, str) or not rationale.strip():
-        return "metadata.rationale must be a non-empty string"
+    
+    is_empty = False
+    if not isinstance(rationale, str):
+        is_empty = True
+    else:
+        r_strip = rationale.strip().lower()
+        if r_strip in ("", "n/a", "none", "null"):
+            is_empty = True
+            
+    if is_empty:
+        return "Model returned empty rationale, proposal rejected"
+        
     metadata["rationale"] = rationale.strip()
     intent.metadata = metadata
     return ""

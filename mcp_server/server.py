@@ -416,6 +416,54 @@ class PokeBridgeService:
                     "message": proposal_payload["proposal_text"],
                 }
 
+            confidence = candidate.get("confidence")
+            if confidence is None:
+                confidence = 0.0
+            else:
+                try:
+                    confidence = float(confidence)
+                except (ValueError, TypeError):
+                    confidence = 0.0
+
+            if confidence < 0.80:
+                print(
+                    f"Skipping Sonnet proposal for {handoff_id}: confidence {confidence} is below 0.80 threshold",
+                    flush=True,
+                )
+                reason_str = f"Confidence {confidence} below 0.80 threshold, skipping Sonnet"
+                proposal_payload = {
+                    "intent_id": "",
+                    "intent": None,
+                    "validation": None,
+                    "token_meta": {},
+                    "raw": "",
+                    "needs_human": True,
+                    "error": reason_str,
+                    "circuit_breaker": cb_payload,
+                    "proposal_text": _proposal_text(
+                        symbol=candidate["symbol"],
+                        side=candidate["side"],
+                        confidence=confidence,
+                        intent=None,
+                        rationale=reason_str,
+                    ),
+                }
+                writer.append_triage_decision(
+                    handoff_id=handoff_id,
+                    proceed=decision.proceed,
+                    reason=decision.reason,
+                    candidate=candidate,
+                    proposal=proposal_payload,
+                )
+                return {
+                    "handoff_id": handoff_id,
+                    "status": "proposal_needs_human",
+                    "needs_human": True,
+                    "candidate": candidate,
+                    "proposal": proposal_payload,
+                    "message": proposal_payload["proposal_text"],
+                }
+
             client = SonnetProposalClient()
             proposal_result = client.propose(
                 {
