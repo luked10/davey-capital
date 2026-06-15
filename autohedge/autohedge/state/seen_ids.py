@@ -83,7 +83,8 @@ class SeenIdsStore:
         if self._initialized and self._db_available:
             return
         try:
-            with self._connect() as conn:
+            conn = self._connect()
+            try:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS seen_ids (
@@ -92,6 +93,8 @@ class SeenIdsStore:
                     )
                     """
                 )
+            finally:
+                conn.close()
             self._db_available = True
             self._initialized = True
         except sqlite3.Error as exc:
@@ -110,7 +113,8 @@ class SeenIdsStore:
             if not self._db_available:
                 return
             try:
-                with self._connect() as conn:
+                conn = self._connect()
+                try:
                     conn.execute(
                         """
                         INSERT OR IGNORE INTO seen_ids (handoff_id, seen_at)
@@ -118,9 +122,11 @@ class SeenIdsStore:
                         """,
                         (clean_id, _utc_now_iso()),
                     )
+                finally:
+                    conn.close()
             except sqlite3.Error as exc:
                 self._db_available = False
-                _warn_fallback_once(str(exc))
+                self._warn_fallback_once(str(exc))
 
     def is_seen(self, handoff_id: str) -> bool:
         clean_id = _clean_text(handoff_id)
@@ -131,16 +137,19 @@ class SeenIdsStore:
             if self._db_available:
                 self._ensure_db()
                 try:
-                    with self._connect() as conn:
+                    conn = self._connect()
+                    try:
                         row = conn.execute(
                             "SELECT 1 FROM seen_ids WHERE handoff_id = ? LIMIT 1",
                             (clean_id,),
                         ).fetchone()
+                    finally:
+                        conn.close()
                     if row is not None:
                         return True
                 except sqlite3.Error as exc:
                     self._db_available = False
-                    _warn_fallback_once(str(exc))
+                    self._warn_fallback_once(str(exc))
             
             # Fallback to in-memory
             return clean_id in self._fallback_seen
