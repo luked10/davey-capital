@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.tools.pattern_tool import candlestick_patterns
+
 
 WATCH_SYMBOLS = (
     "NVDA", "MU", "AMD", "TSLA", "META", "GOOGL",
@@ -97,6 +99,20 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
     if abs(price_move) > PRICE_MOVE_THRESHOLD:
         trigger_reasons.append("price_move_1h")
 
+    # Technical pattern detection
+    try:
+        # Use 5 periods for pattern context if available
+        if len(closes) >= 5:
+            df = hourly.tail(5).copy()
+            patterns = candlestick_patterns(df["Open"], df["High"], df["Low"], df["Close"])
+            latest_pattern = patterns.iloc[-1]
+            if latest_pattern == 1 and side == "buy":
+                trigger_reasons.append("bullish_candlestick")
+            elif latest_pattern == -1 and side == "sell":
+                trigger_reasons.append("bearish_candlestick")
+    except Exception:
+        pass
+
     latest_volume = None
     average_volume = None
     volume_ratio = None
@@ -119,6 +135,11 @@ def _candidate_for_symbol(yf: Any, symbol: str) -> dict[str, Any] | None:
         return None
 
     confidence = 0.55 + min(abs(price_move) * 4.0, 0.25)
+
+    # Adjust confidence for technical patterns
+    if "bullish_candlestick" in trigger_reasons or "bearish_candlestick" in trigger_reasons:
+        confidence += 0.10
+
     if volume_ratio is not None and volume_ratio > VOLUME_MULTIPLIER_THRESHOLD:
         confidence += min((volume_ratio - VOLUME_MULTIPLIER_THRESHOLD) * 0.08, 0.15)
 
