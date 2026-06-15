@@ -112,6 +112,7 @@ SeenIdsStore = seen_ids_module.SeenIdsStore
 from contracts.bridge_contract import (
     ExecutionIntent,
     FillRecord,
+    execution_intent_from_dict,
     execution_intent_to_broker_order,
     validate_execution_intent,
 )
@@ -536,6 +537,20 @@ class PokeBridgeService:
                         rationale=proposal_result.error
                         or "Proposal generation requires human review.",
                     ),
+                }
+                # Fix: Store raw proposal even when intent is None so human can still approve.
+                # Attempt to extract intent from raw if possible to help downstream record_approval_decision.
+                try:
+                    raw_intent_dict = json.loads(proposal_result.raw)
+                    intent_from_raw = execution_intent_from_dict(raw_intent_dict)
+                except (ValueError, TypeError):
+                    intent_from_raw = None
+                
+                self.proposals_by_handoff[handoff_id] = {
+                    "intent": intent_from_raw,
+                    "session_id": session_id,
+                    "candidate": candidate,
+                    "proposal": proposal_payload,
                 }
 
         writer.append_triage_decision(
