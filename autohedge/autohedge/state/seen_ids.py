@@ -45,6 +45,11 @@ class SeenIdsStore:
             if davey_root is not None
             else _default_davey_root()
         )
+        # Fix: use /data on Fly if available, otherwise default root
+        fly_data = Path("/data")
+        if fly_data.exists() and os.access(fly_data, os.W_OK):
+            root = fly_data
+
         self.db_path = (
             Path(db_path).expanduser().resolve()
             if db_path is not None
