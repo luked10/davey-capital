@@ -1,1 +1,0 @@
-"""Vibe-Trading core package."""
