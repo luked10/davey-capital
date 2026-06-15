@@ -212,7 +212,11 @@ def main() -> None:
         assert low_conf_result["status"] == "proposal_needs_human"
         assert low_conf_result["needs_human"] is True
         assert low_conf_result["proposal"]["intent"] is None
-        assert "Confidence 0.75 below 0.80 threshold" in low_conf_result["proposal"]["error"]
+        assert (
+            "Auto-skipped: confidence 0.75 below 0.80 threshold"
+            in low_conf_result["proposal"]["error"]
+        )
+        assert low_conf_result["proposal"]["rationale"]
 
         status = service.get_system_status()
         assert status["active_broker"] == "paper"

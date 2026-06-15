@@ -71,6 +71,9 @@ ALPACA_LIVE_MODULE_PATH = (
 SEEN_IDS_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "state" / "seen_ids.py"
 )
+PROPOSAL_STORE_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "proposal_store.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -98,6 +101,10 @@ circuit_breaker_module = _load_module(
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
 alpaca_live_module = _load_module("davey_mcp_alpaca_live", ALPACA_LIVE_MODULE_PATH)
 seen_ids_module = _load_module("davey_mcp_seen_ids", SEEN_IDS_MODULE_PATH)
+proposal_store_module = _load_module(
+    "davey_mcp_proposal_store",
+    PROPOSAL_STORE_MODULE_PATH,
+)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -108,10 +115,12 @@ evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
 AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
 SeenIdsStore = seen_ids_module.SeenIdsStore
+ProposalStore = proposal_store_module.ProposalStore
 
 from contracts.bridge_contract import (
     ExecutionIntent,
     FillRecord,
+    execution_intent_from_dict,
     execution_intent_to_broker_order,
     validate_execution_intent,
 )
@@ -274,7 +283,13 @@ class PokeBridgeService:
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
         self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
+        self.proposal_store = ProposalStore(davey_root=self.repo_root)
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
+
+    def _forget_proposal(self, handoff_id: str) -> None:
+        """Drop a resolved proposal from memory and the persistent store."""
+        self.proposals_by_handoff.pop(handoff_id, None)
+        self.proposal_store.delete_proposal(handoff_id)
 
     @property
     def overnight_root(self) -> Path:
@@ -382,6 +397,7 @@ class PokeBridgeService:
                 },
             )
             if cb_result.blocked:
+                cb_rationale = "Circuit breaker requires human review: " + cb_result.reason
                 proposal_payload = {
                     "intent_id": "",
                     "intent": None,
@@ -391,13 +407,13 @@ class PokeBridgeService:
                     "needs_human": True,
                     "error": cb_result.reason,
                     "circuit_breaker": cb_payload,
+                    "rationale": cb_rationale,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],
                         confidence=candidate["confidence"],
                         intent=None,
-                        rationale="Circuit breaker requires human review: "
-                        + cb_result.reason,
+                        rationale=cb_rationale,
                     ),
                 }
                 writer.append_triage_decision(
@@ -425,12 +441,21 @@ class PokeBridgeService:
                 except (ValueError, TypeError):
                     confidence = 0.0
 
-            if confidence < 0.80:
+            will_call_sonnet = confidence >= 0.80
+            print(
+                f"confidence={confidence} threshold=0.80 "
+                f"will_call_sonnet={will_call_sonnet}",
+                flush=True,
+            )
+
+            if not will_call_sonnet:
                 print(
                     f"Skipping Sonnet proposal for {handoff_id}: confidence {confidence} is below 0.80 threshold",
                     flush=True,
                 )
-                reason_str = f"Confidence {confidence} below 0.80 threshold, skipping Sonnet"
+                reason_str = (
+                    f"Auto-skipped: confidence {confidence} below 0.80 threshold"
+                )
                 proposal_payload = {
                     "intent_id": "",
                     "intent": None,
@@ -440,6 +465,7 @@ class PokeBridgeService:
                     "needs_human": True,
                     "error": reason_str,
                     "circuit_breaker": cb_payload,
+                    "rationale": reason_str,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],
@@ -482,8 +508,17 @@ class PokeBridgeService:
                 }
             )
             intent = proposal_result.intent
-            rationale = proposal_result.error or "Dry-run proposal generated for human review."
             if intent is not None:
+                # The Sonnet response carries its rationale in
+                # intent.metadata["rationale"] (see sonnet_client validation).
+                # Read it from there; proposal_result.error is empty on success
+                # and must not be used as the rationale source.
+                intent_metadata = (
+                    intent.metadata if isinstance(intent.metadata, dict) else {}
+                )
+                rationale = str(intent_metadata.get("rationale") or "").strip()
+                if not rationale:
+                    rationale = "Dry-run proposal generated for human review."
                 proposal_payload = {
                     "intent_id": intent.intent_id,
                     "intent": audit_module.to_dict(intent),
@@ -504,6 +539,7 @@ class PokeBridgeService:
                     "token_meta": dict(proposal_result.token_meta),
                     "raw": proposal_result.raw,
                     "circuit_breaker": cb_payload,
+                    "rationale": rationale,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],
@@ -518,7 +554,17 @@ class PokeBridgeService:
                     "candidate": candidate,
                     "proposal": proposal_payload,
                 }
+                # Persist so the approval survives a Fly machine restart.
+                self.proposal_store.save_proposal(
+                    handoff_id,
+                    audit_module.to_dict(intent),
+                    rationale,
+                )
             else:
+                rationale = (
+                    proposal_result.error
+                    or "Proposal generation requires human review."
+                )
                 proposal_payload = {
                     "intent_id": "",
                     "intent": None,
@@ -528,13 +574,13 @@ class PokeBridgeService:
                     "error": proposal_result.error,
                     "needs_human": True,
                     "circuit_breaker": cb_payload,
+                    "rationale": rationale,
                     "proposal_text": _proposal_text(
                         symbol=candidate["symbol"],
                         side=candidate["side"],
                         confidence=candidate["confidence"],
                         intent=None,
-                        rationale=proposal_result.error
-                        or "Proposal generation requires human review.",
+                        rationale=rationale,
                     ),
                 }
 
@@ -634,10 +680,24 @@ class PokeBridgeService:
             provider="poke_mcp",
         )
 
+        # Prefer the in-memory proposal (fast path within one process); fall
+        # back to the persistent store so an approval still resolves after a Fly
+        # machine restart wiped the in-memory dict.
+        proposed_intent: ExecutionIntent | None = None
         proposal = self.proposals_by_handoff.get(handoff_id)
+        if proposal is not None and isinstance(proposal.get("intent"), ExecutionIntent):
+            proposed_intent = proposal["intent"]
+        else:
+            stored = self.proposal_store.get_proposal(handoff_id)
+            if stored is not None and isinstance(stored.get("intent"), dict):
+                try:
+                    proposed_intent = execution_intent_from_dict(stored["intent"])
+                except (TypeError, ValueError):
+                    proposed_intent = None
+
         intent_id = ""
         if approved:
-            if proposal is None or not isinstance(proposal.get("intent"), ExecutionIntent):
+            if proposed_intent is None:
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
                     approved=False,
@@ -645,11 +705,9 @@ class PokeBridgeService:
                     reason="approval requested but no validated proposal is available",
                 )
                 return (
-                    f"Approval for {handoff_id} blocked: no validated proposal is "
-                    "available. No intent artifact written."
+                    f"Approval for {handoff_id} blocked: proposal expired or not "
+                    "found, please re-triage. No intent artifact written."
                 )
-
-            proposed_intent = proposal["intent"]
             live_mode = _live_mode_enabled()
             approved_intent = replace(
                 proposed_intent,
@@ -782,6 +840,7 @@ class PokeBridgeService:
                     f"{handoff_id}: order_id={fill.order_id} status={fill.status}",
                     flush=True,
                 )
+                self._forget_proposal(handoff_id)
                 return (
                     f"Approved {handoff_id}; submitted Alpaca order "
                     f"{fill.order_id} with status {fill.status}."
@@ -800,6 +859,7 @@ class PokeBridgeService:
                 "no broker order created",
                 flush=True,
             )
+            self._forget_proposal(handoff_id)
             return (
                 f"Approved {handoff_id}; wrote dry-run approved intent artifact "
                 f"{intent_id}. No broker order was created."
@@ -808,6 +868,7 @@ class PokeBridgeService:
             f"approval path: rejected by human approval gate for {handoff_id}",
             flush=True,
         )
+        self._forget_proposal(handoff_id)
         return f"Rejected {handoff_id}; no intent artifact or broker action taken."
 
     def get_system_status(self) -> dict[str, Any]:
