@@ -69,8 +69,10 @@ def main() -> None:
     if result.intent is not None:
         assert result.validation is not None
         assert result.validation.allowed is True, result.validation.reasons
-        assert result.intent.dry_run is True
+        expected_dry_run = os.getenv("DAVEY_LIVE_MODE", "").strip() != "1"
+        assert result.intent.dry_run is expected_dry_run
         assert result.intent.approved is False
+        assert result.intent.metadata.get("rationale", "").strip()
 
         with tempfile.TemporaryDirectory(prefix="sonnet-live-smoke-audit-") as tmp:
             writer = AuditArtifactWriter(

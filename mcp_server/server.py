@@ -68,6 +68,9 @@ OBSERVATIONS_MODULE_PATH = (
 ALPACA_LIVE_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "brokers" / "alpaca_live.py"
 )
+SEEN_IDS_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "state" / "seen_ids.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -94,6 +97,7 @@ circuit_breaker_module = _load_module(
 )
 observations_module = _load_module("davey_mcp_observations", OBSERVATIONS_MODULE_PATH)
 alpaca_live_module = _load_module("davey_mcp_alpaca_live", ALPACA_LIVE_MODULE_PATH)
+seen_ids_module = _load_module("davey_mcp_seen_ids", SEEN_IDS_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -103,6 +107,7 @@ CircuitBreakerConfig = circuit_breaker_module.CircuitBreakerConfig
 evaluate_circuit_breaker = circuit_breaker_module.evaluate_circuit_breaker
 build_observations = observations_module.build_observations
 AlpacaLiveBroker = alpaca_live_module.AlpacaLiveBroker
+SeenIdsStore = seen_ids_module.SeenIdsStore
 
 from contracts.bridge_contract import (
     ExecutionIntent,
@@ -208,10 +213,9 @@ def _circuit_breaker_payload(result: Any, *, config_error: str = "") -> dict[str
 
 def _runtime_state_with_env(state: Any) -> Any:
     live_mode = _live_mode_enabled()
-    if live_mode:
-        state.live_mode = True
-        state.dry_run = False
-        state.active_broker = "alpaca"
+    state.live_mode = live_mode
+    state.dry_run = not live_mode
+    state.active_broker = "alpaca" if live_mode else "paper"
     return state
 
 
@@ -269,7 +273,7 @@ class PokeBridgeService:
 
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
-        self.seen_ids: set[str] = set()
+        self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposals_by_handoff: dict[str, dict[str, Any]] = {}
 
     @property
@@ -284,7 +288,7 @@ class PokeBridgeService:
         if not self.overnight_root.exists():
             return []
         try:
-            return sorted(self.overnight_root.glob("*/poke_bridge_queue.jsonl"))
+            return sorted(self.overnight_root.rglob("poke_bridge_queue.jsonl"))
         except OSError:
             return []
 
@@ -309,13 +313,16 @@ class PokeBridgeService:
                     continue
                 normalized = validation.normalized
                 handoff_id = normalized["handoff_id"]
-                if handoff_id in self.seen_ids:
+                if self.seen_ids.is_seen(handoff_id):
+                    print(f"candidate already seen: {handoff_id}", flush=True)
                     continue
                 try:
-                    pending.append(_candidate_signal(normalized, session_id=session_id))
+                    candidate = _candidate_signal(normalized, session_id=session_id)
                 except ValidationError:
                     continue
-                self.seen_ids.add(handoff_id)
+                pending.append(candidate)
+                self.seen_ids.mark_seen(handoff_id)
+                print(f"new candidate found: {handoff_id}", flush=True)
         return pending
 
     def submit_triage_decision(
@@ -534,6 +541,10 @@ class PokeBridgeService:
             intent_id=intent_id,
             reason=reason,
         )
+        print(
+            f"approval path: live execution blocked for {handoff_id}: {reason}",
+            flush=True,
+        )
         return f"Approval for {handoff_id} blocked: {reason}"
 
     def _update_runtime_state_after_fill(self, fill: FillRecord) -> None:
@@ -600,6 +611,11 @@ class PokeBridgeService:
                 approved_at=_utc_now_iso(),
             )
             if proposed_intent.dry_run is False and not live_mode:
+                print(
+                    "approval path: forced dry-run audit only for "
+                    f"{handoff_id}; DAVEY_LIVE_MODE is not 1",
+                    flush=True,
+                )
                 writer.write_decision_artifact(
                     decision_id=f"live-mode-forced-dry-run-{handoff_id}",
                     decision="forced_dry_run",
@@ -643,6 +659,10 @@ class PokeBridgeService:
             intent_id = normalized_intent.intent_id
 
             if normalized_intent.dry_run is False:
+                print(
+                    f"approval path: live Alpaca execution for {handoff_id}",
+                    flush=True,
+                )
                 observations = build_observations(normalized_intent.symbol)
                 cb_config, cb_config_error = _load_circuit_breaker_config(self.repo_root)
                 cb_result = evaluate_circuit_breaker(cb_config, observations)
@@ -709,6 +729,11 @@ class PokeBridgeService:
                     intent_id=intent_id,
                     reason="approved and submitted to Alpaca",
                 )
+                print(
+                    "approval path: live Alpaca execution complete for "
+                    f"{handoff_id}: order_id={fill.order_id} status={fill.status}",
+                    flush=True,
+                )
                 return (
                     f"Approved {handoff_id}; submitted Alpaca order "
                     f"{fill.order_id} with status {fill.status}."
@@ -722,16 +747,32 @@ class PokeBridgeService:
             reason="" if approved else "rejected by human approval gate",
         )
         if approved:
+            print(
+                f"approval path: dry-run audit only for {handoff_id}; "
+                "no broker order created",
+                flush=True,
+            )
             return (
                 f"Approved {handoff_id}; wrote dry-run approved intent artifact "
                 f"{intent_id}. No broker order was created."
             )
+        print(
+            f"approval path: rejected by human approval gate for {handoff_id}",
+            flush=True,
+        )
         return f"Rejected {handoff_id}; no intent artifact or broker action taken."
 
     def get_system_status(self) -> dict[str, Any]:
         result = load_runtime_state(self.repo_root / "runtime_state.json")
         if not result.ok or result.state is None:
             state = _runtime_state_with_env(default_runtime_state(updated_at=""))
+            try:
+                runtime_state_module.save_runtime_state(
+                    state,
+                    self.repo_root / "runtime_state.json",
+                )
+            except Exception:
+                pass
             missing_only = result.reasons == (
                 f"runtime state file not found: {self.repo_root / 'runtime_state.json'}",
             )
@@ -743,6 +784,13 @@ class PokeBridgeService:
                 "last_error": "" if missing_only else "; ".join(result.reasons),
             }
         state = _runtime_state_with_env(result.state)
+        try:
+            runtime_state_module.save_runtime_state(
+                state,
+                self.repo_root / "runtime_state.json",
+            )
+        except Exception:
+            pass
         return {
             "active_broker": state.active_broker,
             "dry_run": state.dry_run,
@@ -781,9 +829,15 @@ def _scheduler_enabled() -> bool:
 
 def _run_scheduler_start() -> None:
     try:
-        runtime_scaffold_module.start()
+        print("scheduler background start requested", flush=True)
+        result = runtime_scaffold_module.start()
+        print(
+            "scheduler background start result: "
+            + json.dumps(result, sort_keys=True, default=str),
+            flush=True,
+        )
     except Exception as exc:
-        print(f"scheduler start failed safely: {exc}", file=sys.stderr)
+        print(f"scheduler start failed safely: {exc}", file=sys.stderr, flush=True)
 
 
 def start_scheduler_background() -> bool:
@@ -791,8 +845,10 @@ def start_scheduler_background() -> bool:
     global _SCHEDULER_THREAD
 
     if not _scheduler_enabled():
+        print("scheduler disabled: DAVEY_SCHEDULER_ENABLED is not 1", flush=True)
         return False
     if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+        print("scheduler already running", flush=True)
         return True
     _SCHEDULER_THREAD = Thread(
         target=_run_scheduler_start,
@@ -800,6 +856,7 @@ def start_scheduler_background() -> bool:
         daemon=True,
     )
     _SCHEDULER_THREAD.start()
+    print("scheduler background thread launched", flush=True)
     return True
 
 
