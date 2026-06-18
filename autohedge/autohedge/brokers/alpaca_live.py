@@ -321,15 +321,16 @@ class AlpacaLiveBroker:
             raise
 
     def _execute_order(self, order: BrokerOrderAgent) -> dict[str, Any]:
+        notional_value = (order.metadata or {}).get("estimated_notional")
+        if notional_value is None:
+            raise ValueError("estimated_notional missing from order metadata; cannot build notional payload")
         payload: dict[str, Any] = {
             "symbol": order.symbol,
+            "notional": str(round(float(notional_value), 2)),
             "side": order.side,
-            "type": order.order_type,
-            "time_in_force": order.time_in_force,
-            "qty": str(order.quantity),
+            "type": "market",
+            "time_in_force": "day",
         }
-        if order.limit_price is not None:
-            payload["limit_price"] = str(order.limit_price)
         headers = {
             "APCA-API-KEY-ID": self.api_key,
             "APCA-API-SECRET-KEY": self.api_secret,

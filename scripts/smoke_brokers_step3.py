@@ -294,9 +294,8 @@ def main() -> None:
                 "submitted_at": "2026-05-31T04:00:10Z",
                 "symbol": payload["symbol"],
                 "side": payload["side"],
-                "qty": payload["qty"],
+                "notional": payload["notional"],
                 "type": payload["type"],
-                "limit_price": payload.get("limit_price"),
             }
 
         with tempfile.TemporaryDirectory(prefix="alpaca-live-wrapper-") as tmp:
