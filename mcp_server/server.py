@@ -146,11 +146,11 @@ _SURFACE_CONFIDENCE_THRESHOLD = 0.65
 
 
 def _extract_ticker_from_query(query: str, known_symbols: frozenset[str]) -> str | None:
-    \"\"\"Extract the most likely ticker from a free-text query.
+    """Extract the most likely ticker from a free-text query.
 
     Prefers known WATCH_SYMBOLS (case-insensitive). Falls back to the first
     all-uppercase 1–5 letter token in the original query.
-    \"\"\"
+    """
     import re
     tokens = re.findall(r"\b([A-Za-z]{1,5})\b", query)
     for t in tokens:
@@ -161,7 +161,7 @@ def _extract_ticker_from_query(query: str, known_symbols: frozenset[str]) -> str
 
 
 def _headline_sentiment(title: str) -> tuple[int, int]:
-    \"\"\"Return (bullish_hits, bearish_hits) for a news headline using substring match.\"\"\"
+    """Return (bullish_hits, bearish_hits) for a news headline using substring match."""
     lower = title.lower()
     bull = sum(1 for kw in _BULLISH_KEYWORDS if kw in lower)
     bear = sum(1 for kw in _BEARISH_KEYWORDS if kw in lower)
@@ -215,11 +215,11 @@ def _research_tier_label(confidence: float) -> str:
 
 
 def _select_research_preset(confidence: float) -> str | None:
-    \"\"\"Map a candidate confidence to the vibe-trading swarm preset to run.
+    """Map a candidate confidence to the vibe-trading swarm preset to run.
 
     Tier A returns None (no swarm). Tier B runs the technical_analysis_panel.
     Tier C runs the investment_committee. Below 0.80 also returns None.
-    \"\"\"
+    """
     try:
         conf = float(confidence)
     except (TypeError, ValueError):
@@ -236,7 +236,7 @@ def _vibe_trading_base_url() -> str:
 
 
 def _swarm_user_vars(preset_name: str, symbol: str) -> dict[str, str]:
-    \"\"\"Map a symbol onto the variables each preset declares (see preset YAML).\"\"\"
+    """Map a symbol onto the variables each preset declares (see preset YAML)."""
     if preset_name == "investment_committee":
         return {"target": symbol, "market": "US"}
     # technical_analysis_panel (and any default) take target + timeframe.
@@ -249,14 +249,14 @@ def call_vibe_trading_swarm(
     *,
     timeout: float = 60.0,
 ) -> dict[str, Any] | None:
-    \"\"\"Best-effort vibe-trading swarm call. Returns a research dict or None.
+    """Best-effort vibe-trading swarm call. Returns a research dict or None.
 
     Starts a swarm run (POST /swarm/runs), then polls run status until it
     reaches a terminal state or the timeout elapses, returning the final
     report. Skips silently (returns None) when VIBE_TRADING_URL is unset or on
     ANY error/timeout. This is research enrichment only — it must never raise
     into or block the proposal pipeline.
-    \"\"\"
+    """
     base = _vibe_trading_base_url()
     if not base or not preset_name:
         return None
@@ -464,7 +464,7 @@ def _proposal_text(
 
 
 class PokeBridgeService:
-    \"\"\"Stateful local bridge service for one running MCP server process.\"\"\"
+    """Stateful local bridge service for one running MCP server process."""
 
     def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
         self.repo_root = Path(repo_root)
@@ -486,7 +486,7 @@ class PokeBridgeService:
         )
 
     def _forget_proposal(self, handoff_id: str) -> None:
-        \"\"\"Remove a resolved proposal from the persistent store.\"\"\"
+        """Remove a resolved proposal from the persistent store."""
         self.proposal_store.delete_proposal(handoff_id)
 
     @property
@@ -950,7 +950,7 @@ class PokeBridgeService:
         # Read proposal from the persistent store (survives Fly machine restarts).
         # A persisted marker with intent_json=None means needs_human — there is
         # no executable intent and we should surface a clear message rather than
-        # the generic \"proposal expired or not found\".
+        # the generic "proposal expired or not found".
         proposal = self.proposal_store.get_proposal(handoff_id)
         intent_id = ""
         if approved:
@@ -1214,7 +1214,7 @@ class PokeBridgeService:
         }
 
     def research_and_surface_candidates(self, query: str) -> dict[str, Any]:
-        \"\"\"Research a symbol via yfinance news and surface a candidate if warranted.\"\"\"
+        """Research a symbol via yfinance news and surface a candidate if warranted."""
         query = str(query or "").strip()
         known: frozenset[str] = frozenset(market_feed_module.WATCH_SYMBOLS)
         symbol = _extract_ticker_from_query(query, known)
@@ -1321,7 +1321,7 @@ class PokeBridgeService:
                         "relevant_headlines": relevant_headlines[:5],
                     },
                 })
-                if result.get("status") == \"ok\":
+                if result.get("status") == "ok":
                     queued = True
                     handoff_id = str(result.get("handoff_id", ""))
                 else:
@@ -1364,14 +1364,14 @@ class PokeBridgeService:
         trigger_reason: str,
         direction: str,
     ) -> dict[str, Any]:
-        \"\"\"Queue a Poke-researched candidate (Tier 1 → Tier 2 handoff).
+        """Queue a Poke-researched candidate (Tier 1 → Tier 2 handoff).
 
         Poke calls this AFTER doing its own free web research. The supplied
         confidence is trusted as-is: Poke-injected candidates BYPASS composite
         scoring entirely (see market_feed.composite_confidence). The circuit
         breaker is checked before queuing; a tripped breaker blocks injection.
         Writes to the same overnight poke queue the scheduler uses.
-        \"\"\"
+        """
         symbol = str(symbol or "").strip().upper()
         direction = str(direction or "").strip().lower()
         thesis = str(thesis or "").strip()
@@ -1487,14 +1487,14 @@ class PokeBridgeService:
         confidence: float,
         candidate_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        \"\"\"Assemble the Tier 2 research context attached to the Sonnet proposal.
+        """Assemble the Tier 2 research context attached to the Sonnet proposal.
 
         Always includes price data (read from candidate metadata — no extra
         network call), the Poke thesis if present, and PatternTool triggers.
         Tier B adds the technical_analysis_panel swarm; Tier C adds the
         investment_committee swarm. vibe-trading is best-effort and skipped
         silently on any failure.
-        \"\"\"
+        """
         metadata = candidate_metadata if isinstance(candidate_metadata, dict) else {}
         package: dict[str, Any] = {
             "symbol": symbol,
@@ -1520,7 +1520,7 @@ class PokeBridgeService:
         return package
 
     def get_market_overview(self) -> dict[str, Any]:
-        \"\"\"Return current price, % change, and volume ratio for all watched tickers.\"\"\"
+        """Return current price, % change, and volume ratio for all watched tickers."""
         symbols = list(market_feed_module.WATCH_SYMBOLS)
 
         try:
@@ -1564,7 +1564,7 @@ class PokeBridgeService:
                     "prev_close": round(prev_close, 2) if prev_close is not None else None,
                     "volume_ratio_3m": volume_ratio,
                     "side": "buy" if (pct_change or 0) >= 0 else "sell",
-                    "status": \"ok\",
+                    "status": "ok",
                 }
             except Exception as exc:
                 overview[symbol] = {"status": "error", "error": str(exc)}
@@ -1576,7 +1576,7 @@ class PokeBridgeService:
         }
 
     def get_daily_report(self) -> str:
-        \"\"\"Return today's local nova-alpha report for Poke/SMS delivery.\"\"\"
+        """Return today's local nova-alpha report for Poke/SMS delivery."""
         try:
             report_date = datetime.now(timezone.utc).date().isoformat()
             artifacts = report_module.load_local_artifacts(
@@ -1600,9 +1600,9 @@ class PokeBridgeService:
         confidence: float,
         thesis: str,
     ) -> dict[str, Any]:
-        \"\"\"Expose candidate injection via MCP to allow external research tools (Poke)
+        """Expose candidate injection via MCP to allow external research tools (Poke)
         to directly proposal symbols for research and execution.
-        \"\"\"
+        """
         return self.inject_researched_candidate(
             symbol=symbol,
             thesis=thesis,
@@ -1634,7 +1634,7 @@ def _run_scheduler_start() -> None:
 
 
 def start_scheduler_background() -> bool:
-    \"\"\"Start the opt-in scheduler without blocking the MCP/SSE server.\"\"\"
+    """Start the opt-in scheduler without blocking the MCP/SSE server."""
     global _SCHEDULER_THREAD
 
     if not _scheduler_enabled():
@@ -1728,7 +1728,7 @@ def mcp_inject_researched_candidate(
 
 
 def build_mcp_app():
-    \"\"\"Build the MCP app lazily so offline imports do not require mcp.\"\"\"
+    """Build the MCP app lazily so offline imports do not require mcp."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
