@@ -113,6 +113,7 @@ Output ONLY one valid JSON object matching the ExecutionIntent dataclass:
   "created_at": ISO-8601 string,
   "order_type": "market" | "limit",
   "limit_price": number | null,
+  "estimated_notional": positive USD number | null,
   "time_in_force": string,
   "dry_run": {target_dry_run},
   "approved": false,
@@ -130,6 +131,10 @@ Hard rules:
 - approved must always be false.
 - approved_by and approved_at must always be empty strings.
 - metadata.rationale must be a non-empty string.
+- estimated_notional is the intended order size in US dollars. For live orders it
+  must be a positive number that is at least 1.00 (Alpaca's minimum) and no more
+  than 10.00 (the per-order cap). Set it explicitly so fractional or expensive
+  symbols size by dollars, never by a floored share count.
 - Do not emit prose, markdown, code fences, or multiple JSON objects.
 - Do not claim an order was placed or approved.
 - If uncertain, still output an unapproved ExecutionIntent and include

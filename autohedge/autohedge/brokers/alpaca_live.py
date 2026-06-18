@@ -30,6 +30,7 @@ from contracts.bridge_contract import (
 
 
 MAX_ORDER_NOTIONAL_USD = 10.0  # Live account balance ~$20, cap set to $10 per order
+ALPACA_MIN_NOTIONAL_USD = 1.0  # Alpaca rejects notional orders below $1.00 with HTTP 422
 ALPACA_PAPER_URL = "https://paper-api.alpaca.markets"
 ALPACA_LIVE_URL = "https://api.alpaca.markets"
 
@@ -209,6 +210,14 @@ class AlpacaLiveBroker:
         return float(price)
 
     def _estimate_notional(self, intent: ExecutionIntent, order: dict[str, Any]) -> float | None:
+        # Prefer the explicit dollar amount carried by the intent/proposal. This
+        # is the source of truth for order size and avoids deriving a notional
+        # from a floored share count (which can fall below Alpaca's $1.00 min).
+        explicit = _positive_float(getattr(intent, "estimated_notional", None))
+        if explicit is None:
+            explicit = _positive_float(order.get("estimated_notional"))
+        if explicit is not None:
+            return explicit
         metadata = dict(intent.metadata or {})
         notional = _positive_float(metadata.get("notional"))
         if notional is not None:
@@ -270,6 +279,12 @@ class AlpacaLiveBroker:
                 )
                 notional = estimated
 
+        if notional < ALPACA_MIN_NOTIONAL_USD:
+            raise ValueError(
+                f"order notional ${notional:.2f} is below Alpaca's "
+                f"${ALPACA_MIN_NOTIONAL_USD:.2f} minimum; set a larger "
+                "estimated_notional (dollar amount) on the intent"
+            )
         if notional > MAX_ORDER_NOTIONAL_USD:
             raise ValueError(
                 f"order notional ${notional:.2f} exceeds hard ${MAX_ORDER_NOTIONAL_USD:.0f} cap"
@@ -337,6 +352,9 @@ class AlpacaLiveBroker:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        # Trace the exact body sent to Alpaca so notional/symbol issues are
+        # visible in logs without exposing credentials.
+        print(f"alpaca submit payload: {json.dumps(payload, sort_keys=True)}", flush=True)
         return self._submitter(f"{self.base_url}/v2/orders", payload, headers)
 
     def _post_order(

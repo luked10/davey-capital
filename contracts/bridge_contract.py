@@ -52,6 +52,7 @@ class ExecutionIntent:
     created_at: str
     order_type: str = "market"
     limit_price: float | None = None
+    estimated_notional: float | None = None
     time_in_force: str = "day"
     dry_run: bool = True
     approved: bool = False
@@ -239,6 +240,11 @@ def validate_execution_intent(
         if notional is None or notional <= 0:
             reasons.append("notional must be positive when provided")
 
+    if intent.estimated_notional is not None:
+        est_notional = _positive_float(intent.estimated_notional)
+        if est_notional is None or est_notional <= 0:
+            reasons.append("estimated_notional must be positive when provided")
+
     if order_type == "limit":
         limit_price = _positive_float(intent.limit_price)
         if limit_price is None or limit_price <= 0:
@@ -322,6 +328,7 @@ def execution_intent_to_broker_order(
         "quantity": float(normalized.quantity),
         "order_type": normalized.order_type,
         "limit_price": normalized.limit_price,
+        "estimated_notional": normalized.estimated_notional,
         "time_in_force": normalized.time_in_force,
         "asset_class": asset_class.lower(),
         "metadata": dict(normalized.metadata),

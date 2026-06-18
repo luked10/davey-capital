@@ -39,7 +39,11 @@ def _load_alpaca_live_module():
     return module
 
 
-def _make_market_intent(intent_id: str, quantity: float) -> ExecutionIntent:
+def _make_market_intent(
+    intent_id: str,
+    quantity: float,
+    estimated_notional: float | None = None,
+) -> ExecutionIntent:
     return ExecutionIntent(
         intent_id=intent_id,
         signal_id="smoke",
@@ -48,6 +52,7 @@ def _make_market_intent(intent_id: str, quantity: float) -> ExecutionIntent:
         side="buy",
         quantity=quantity,
         order_type="market",
+        estimated_notional=estimated_notional,
         created_at="2026-06-15T00:00:00Z",
         dry_run=False,
         approved=True,
@@ -111,16 +116,25 @@ def _smoke_offline_market_price_fetch(alpaca_live_module) -> None:
         )
         assert notional_b <= MAX_CAP, f"notional {notional_b} exceeds cap {MAX_CAP}"
 
-        # C) Price so high that even 1 share > cap → minimum qty 0.001.
-        # 2 shares × $500 = $1000 > $10 → floor(10/500) = 0 → min 0.001
+        # C) Price so high that even the floored minimum qty 0.001 yields a
+        # notional below Alpaca's $1.00 minimum → must fail closed (this is the
+        # AMD/ARM 422 "notional must be >= 1.00" class of bug).
+        # 2 shares × $500 = $1000 > $10 cap → floor(10/500) = 0 → min 0.001 qty
+        # → 0.001 × $500 = $0.50 < $1.00 minimum.
         broker_c = make_broker(lambda sym: 500.0)
-        order_c, notional_c = broker_c._validate_for_submission(
-            _make_market_intent("smoke-c", quantity=2.0)
+        below_min_blocked = False
+        try:
+            broker_c._validate_for_submission(
+                _make_market_intent("smoke-c", quantity=2.0)
+            )
+        except ValueError as exc:
+            below_min_blocked = True
+            assert "minimum" in str(exc).lower(), (
+                f"expected Alpaca minimum error, got: {exc}"
+            )
+        assert below_min_blocked, (
+            "expected ValueError when derived notional falls below $1.00 minimum"
         )
-        assert float(order_c["quantity"]) == 0.001, (
-            f"expected minimum 0.001, got {order_c['quantity']}"
-        )
-        assert notional_c <= MAX_CAP
 
         # D) yfinance fetch failure blocks the order (fail closed).
         def raise_on_fetch(sym):
@@ -138,6 +152,24 @@ def _smoke_offline_market_price_fetch(alpaca_live_module) -> None:
                 f"unexpected error message: {exc}"
             )
         assert blocked, "expected ValueError when price fetch fails"
+
+        # E) Explicit estimated_notional (dollars) sizes the order directly and
+        # bypasses the price-fetch/share-floor path — the AMD/ARM fix. An
+        # expensive symbol that would floor to a sub-$1.00 notional now submits
+        # the intended dollar amount instead.
+        def _explode(sym):  # must NOT be called when notional is explicit
+            raise AssertionError("price fetch must be skipped when estimated_notional is set")
+
+        broker_e = make_broker(_explode)
+        order_e, notional_e = broker_e._validate_for_submission(
+            _make_market_intent("smoke-e", quantity=1.0, estimated_notional=4.45)
+        )
+        assert abs(notional_e - 4.45) < 0.01, (
+            f"explicit notional should pass through as 4.45, got {notional_e}"
+        )
+        assert order_e["estimated_notional"] == 4.45, (
+            f"broker order must carry estimated_notional, got {order_e.get('estimated_notional')}"
+        )
 
     print("alpaca live smoke (offline market price logic): ok")
 
