@@ -12,7 +12,10 @@ import sys
 from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 
 EngineFactory = Callable[[], Any]
@@ -62,7 +65,12 @@ def live_mode_enabled_from_env() -> bool:
 
 def _is_us_equity_market_open() -> bool:
     """Check if US equity markets are currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
-    now_et = datetime.now(ZoneInfo("America/New_York"))
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        # Fallback if ZoneInfo fails (e.g. missing tzdata)
+        return True
+
     # Weekdays: Mon=0, Fri=4
     if now_et.weekday() > 4:
         return False
