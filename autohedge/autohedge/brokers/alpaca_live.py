@@ -391,9 +391,34 @@ class AlpacaLiveBroker:
             or _clean_text(response.get("submitted_at"))
             or _utc_now_iso()
         )
-        price = _positive_float(response.get("filled_avg_price"))
-        if price is None:
-            price = _positive_float(order.limit_price)
+        # Avg fill price is the venue-reported execution price ONLY. Never
+        # substitute notional, limit price, or a pre-trade estimate here — that
+        # crossing is exactly what produced the bogus 545.43/1196.53 "prices".
+        avg_fill_price = _positive_float(response.get("filled_avg_price"))
+
+        # Actual filled quantity comes from the venue. We submit dollar-notional
+        # orders with no qty, so the real (fractional) share count returns as
+        # filled_qty. The pre-trade share estimate (order.quantity, possibly
+        # floored by the cap logic) is kept separate and used only as a last
+        # resort when the venue has not yet reported a fill.
+        submitted_qty_estimate = _positive_float(order.quantity)
+        filled_qty = _positive_float(response.get("filled_qty"))
+        if filled_qty is None:
+            filled_qty = _positive_float(response.get("qty"))
+        if filled_qty is None:
+            filled_qty = submitted_qty_estimate
+
+        # Dollar amount we asked the venue to trade (the notional order size).
+        requested_notional = _positive_float((order.metadata or {}).get("estimated_notional"))
+
+        # Realized cost = filled_qty * avg_fill_price, computed explicitly from
+        # the two actual fill fields. Fall back to the requested notional only
+        # when the venue has not reported an execution price yet.
+        if filled_qty is not None and avg_fill_price is not None:
+            total_notional = round(filled_qty * avg_fill_price, 4)
+        else:
+            total_notional = requested_notional
+
         return FillRecord(
             fill_id=_safe_artifact_id(f"alpaca-{order_id}"),
             intent_id=intent.intent_id,
@@ -401,9 +426,9 @@ class AlpacaLiveBroker:
             order_id=order_id,
             symbol=order.symbol,
             side=order.side,
-            quantity=float(order.quantity),
+            quantity=float(filled_qty) if filled_qty is not None else 0.0,
             filled_at=filled_at,
-            price=price,
+            price=avg_fill_price,
             fee=None,
             status=status,
             dry_run=False,
@@ -411,6 +436,14 @@ class AlpacaLiveBroker:
                 "paper_trading": not self.live_trading,
                 "live_trading": self.live_trading,
                 "base_url": self.base_url,
+                # Disaggregated, explicitly-labeled fields so downstream reports
+                # cannot confuse price, quantity, and notional for one another.
+                "avg_fill_price": avg_fill_price,
+                "filled_qty": filled_qty,
+                "submitted_qty_estimate": submitted_qty_estimate,
+                "requested_notional": requested_notional,
+                "total_notional": total_notional,
+                "limit_price_estimate": _positive_float(order.limit_price),
                 "raw_order": {
                     key: value
                     for key, value in response.items()

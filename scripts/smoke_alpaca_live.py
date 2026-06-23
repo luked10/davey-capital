@@ -171,6 +171,59 @@ def _smoke_offline_market_price_fetch(alpaca_live_module) -> None:
             f"broker order must carry estimated_notional, got {order_e.get('estimated_notional')}"
         )
 
+        # F) Fill field integrity for a capped fractional market order. The
+        # broker submits a $-notional order with a floored qty estimate (0.001);
+        # the venue fills a real fractional share count at the real avg price.
+        # The FillRecord must report the ACTUAL filled qty and avg price, and a
+        # total_notional derived from them — never crossing the floored estimate
+        # with the price (the 545.43/1196.53 bug).
+        BrokerOrderAgent = alpaca_live_module.BrokerOrderAgent
+        broker_f = make_broker(lambda sym: 148.0)
+        capped_order = BrokerOrderAgent(
+            symbol="AMD",
+            side="buy",
+            quantity=0.001,  # floored pre-trade estimate
+            order_type="market",
+            limit_price=None,
+            time_in_force="day",
+            asset_class="stock",
+            metadata={"estimated_notional": 5.0},
+        )
+        venue_response = {
+            "id": "amd-frac-0001",
+            "status": "filled",
+            "filled_at": "2026-06-23T14:30:05Z",
+            "symbol": "AMD",
+            "side": "buy",
+            "qty": "0.033783",
+            "filled_qty": "0.033783",
+            "filled_avg_price": "148.00",
+        }
+        fill_f = broker_f._fill_from_response(
+            _make_market_intent("smoke-f", quantity=0.001, estimated_notional=5.0),
+            capped_order,
+            venue_response,
+        )
+        # price is the real avg fill, NOT a notional/qty cross.
+        assert fill_f.price == 148.0, f"avg fill price must be 148.0, got {fill_f.price}"
+        # quantity is the ACTUAL filled qty, not the 0.001 floored estimate.
+        assert abs(fill_f.quantity - 0.033783) < 1e-9, (
+            f"quantity must be the venue filled_qty, got {fill_f.quantity}"
+        )
+        # The floored estimate is preserved separately, never as price/quantity.
+        assert fill_f.metadata["submitted_qty_estimate"] == 0.001
+        assert fill_f.metadata["avg_fill_price"] == 148.0
+        assert fill_f.metadata["filled_qty"] == 0.033783
+        expected_notional = round(0.033783 * 148.0, 4)
+        assert fill_f.metadata["total_notional"] == expected_notional, (
+            f"total_notional must be filled_qty*avg_fill_price={expected_notional}, "
+            f"got {fill_f.metadata['total_notional']}"
+        )
+        # Guard the specific bug: price must be sane, not notional/floored_qty.
+        assert fill_f.price < 200.0, (
+            f"price {fill_f.price} looks like a notional/qty cross, not a real fill"
+        )
+
     print("alpaca live smoke (offline market price logic): ok")
 
 
