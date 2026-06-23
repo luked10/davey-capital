@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 import importlib.util
 import json
 import os
@@ -12,6 +12,7 @@ import sys
 from threading import Event, Lock, Thread
 import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 
 EngineFactory = Callable[[], Any]
@@ -57,6 +58,37 @@ def scheduler_enabled_from_env() -> bool:
 def live_mode_enabled_from_env() -> bool:
     """Execution-mode gate; still separate from real-money Alpaca trading."""
     return os.getenv("DAVEY_LIVE_MODE", "").strip() == "1"
+
+
+def _is_us_equity_market_open() -> bool:
+    """Check if US equity markets are currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    # Weekdays: Mon=0, Fri=4
+    if now_et.weekday() > 4:
+        return False
+    
+    current_time = now_et.time()
+    market_open = dt_time(9, 30)
+    market_close = dt_time(16, 0)
+    
+    # Simple holiday check (matches vibe-trading triggers.py subset)
+    today = now_et.date()
+    holidays = {
+        datetime(2026, 1, 1).date(),   # New Year's
+        datetime(2026, 1, 19).date(),  # MLK
+        datetime(2026, 2, 16).date(),  # President's
+        datetime(2026, 4, 3).date(),   # Good Friday
+        datetime(2026, 5, 25).date(),  # Memorial
+        datetime(2026, 6, 19).date(),  # Juneteenth
+        datetime(2026, 7, 3).date(),   # Independence (obs)
+        datetime(2026, 9, 7).date(),   # Labor
+        datetime(2026, 11, 26).date(), # Thanksgiving
+        datetime(2026, 12, 25).date(), # Christmas
+    }
+    if today in holidays:
+        return False
+        
+    return market_open <= current_time < market_close
 
 
 def _load_local_module(name: str, relative_path: str):
@@ -257,6 +289,10 @@ def run_watcher_cycle(
     fetcher: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Fetch local market candidates and hand them to the deterministic watcher."""
+    if not _is_us_equity_market_open():
+        print(f"skipping watcher cycle at {datetime.now().isoformat()}: US equity market is closed", flush=True)
+        return {"status": "skipped", "reason": "market_closed"}
+
     root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
     clean_session_id = (
         session_id
@@ -743,11 +779,11 @@ def start(
     prefer_apscheduler: bool = True,
     fetcher: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Register the market watcher job and start only when env-enabled.
+    \"\"\"Register the market watcher job and start only when env-enabled.
 
     Importing this module has no scheduler side effects. This explicit entry
     point is safe for one-cycle verification and for MCP server startup.
-    """
+    \"\"\"
     global _ACTIVE_SCHEDULER
 
     enabled = scheduler_enabled_from_env()
