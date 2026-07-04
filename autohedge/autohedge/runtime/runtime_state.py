@@ -14,7 +14,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 
@@ -64,6 +66,33 @@ class RuntimeStateLoadResult:
             reason_text = "; ".join(self.reasons) if self.reasons else "runtime state load failed"
             raise ValueError(f"Runtime state unavailable: {reason_text}")
         return self.state
+
+
+def atomic_write_json(path: str | Path, payload: Any) -> Path:
+    """Atomically write ``payload`` as JSON: temp file -> fsync -> os.replace.
+
+    Readers never observe a partially-written or concatenated file, which is
+    what previously produced ``json.JSONDecodeError: Extra data`` crashes.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return target
 
 
 def default_runtime_state(*, updated_at: str | None = None) -> RuntimeState:
@@ -162,6 +191,20 @@ def load_runtime_state(path: str | Path) -> RuntimeStateLoadResult:
     return RuntimeStateLoadResult(ok=True, needs_human=False, state=state)
 
 
+def load_runtime_state_or_default(path: str | Path) -> RuntimeState:
+    """Load runtime state, falling back to safe defaults on missing/corrupt files.
+
+    Runtime callers (scheduler, position monitor, MCP server) use this so a
+    torn or corrupted runtime_state.json degrades to paper/dry-run defaults
+    instead of crashing; approval-gated readers keep using
+    ``load_runtime_state`` which fails closed.
+    """
+    result = load_runtime_state(path)
+    if result.ok and result.state is not None:
+        return result.state
+    return default_runtime_state()
+
+
 def save_runtime_state(
     state: RuntimeState,
     path: str | Path,
@@ -183,10 +226,4 @@ def save_runtime_state(
     if _validate_state_payload(payload, reasons) is None:
         raise ValueError("refusing to write malformed runtime state: " + "; ".join(reasons))
 
-    state_path = Path(path)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return state_path
+    return atomic_write_json(path, payload)

@@ -10,9 +10,11 @@ before being returned.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from contracts.bridge_contract import (
@@ -23,6 +25,25 @@ from contracts.bridge_contract import (
     execution_intent_from_dict,
     validate_execution_intent,
 )
+
+
+def _load_atr_sizing():
+    """Load risk/atr_sizing.py whether or not the autohedge package resolves."""
+    try:
+        from autohedge.risk import atr_sizing
+
+        return atr_sizing
+    except Exception:
+        module_path = Path(__file__).resolve().parents[1] / "risk" / "atr_sizing.py"
+        spec = importlib.util.spec_from_file_location(
+            "davey_sonnet_atr_sizing", str(module_path)
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Unable to load module from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["davey_sonnet_atr_sizing"] = module
+        spec.loader.exec_module(module)
+        return module
 
 
 SONNET_PROPOSAL_CLIENT_VERSION = "0.1.0"
@@ -122,7 +143,11 @@ Output ONLY one valid JSON object matching the ExecutionIntent dataclass:
   "status": "pending",
   "metadata": {{
     "rationale": non-empty string
-  }}
+  }},
+  "risk": {{ "stop_mult": 1.75 | 2.0 | 2.25 | 2.5 | 3.0, "risk_budget": positive USD number }} | null,
+  "entry": null,
+  "exit_plan": null,
+  "regime_gate": null
 }}
 
 Hard rules:
@@ -135,6 +160,14 @@ Hard rules:
   must be a positive number that is at least 1.00 (Alpaca's minimum) and no more
   than 10.00 (the per-order cap). Set it explicitly so fractional or expensive
   symbols size by dollars, never by a floored share count.
+- Position sizing: you only pick the ATR bucket. When the candidate metadata
+  includes atr14 and an entry price, set "risk" to an object with exactly two
+  fields: stop_mult (the bucket multiplier: ATR% < 2.5 -> 1.75; 2.5-4.5 ->
+  2.0-2.25; 4.5-7 -> 2.5; > 7 -> 3.0 or recommend skipping) and risk_budget
+  (dollars you are willing to lose on the trade, at most 2.00). NEVER compute
+  shares, risk_per_share, or notional yourself — Python computes every number
+  deterministically from atr14. Leave "entry", "exit_plan", and "regime_gate"
+  as null; Python fills them. If atr14 is not provided, set "risk" to null.
 - Do not emit prose, markdown, code fences, or multiple JSON objects.
 - Do not claim an order was placed or approved.
 - If uncertain, still output an unapproved ExecutionIntent and include
@@ -252,6 +285,17 @@ class SonnetProposalClient:
                 raw=raw,
                 needs_human=True,
                 error=schema_error,
+            )
+
+        intent, sizing_error = _apply_python_sizing(intent, candidate_payload)
+        if sizing_error:
+            return SonnetProposalResult(
+                intent=None,
+                validation=None,
+                token_meta=token_meta,
+                raw=raw,
+                needs_human=True,
+                error=sizing_error,
             )
 
         validation_intent = _proposal_validation_intent(intent, live_mode=live_mode)
@@ -403,6 +447,117 @@ def _proposal_schema_error(intent: ExecutionIntent, *, live_mode: bool) -> str:
     metadata["rationale"] = rationale.strip()
     intent.metadata = metadata
     return ""
+
+
+MAX_SONNET_RISK_BUDGET = 2.0
+
+
+def _candidate_sizing_inputs(candidate_payload: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Extract (atr14, entry_price) from the candidate payload, if present."""
+    metadata = candidate_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    research = metadata.get("research_package")
+    research = research if isinstance(research, dict) else {}
+    price_data = research.get("price_data")
+    price_data = price_data if isinstance(price_data, dict) else {}
+
+    def _first_positive(*values: Any) -> float | None:
+        for value in values:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number == number and number > 0:
+                return number
+        return None
+
+    atr14 = _first_positive(
+        candidate_payload.get("atr14"),
+        metadata.get("atr14"),
+        metadata.get("atr"),
+        research.get("atr14"),
+    )
+    entry_price = _first_positive(
+        candidate_payload.get("entry_price"),
+        metadata.get("entry_price"),
+        metadata.get("latest_price"),
+        metadata.get("latest_close"),
+        price_data.get("latest_price"),
+    )
+    return atr14, entry_price
+
+
+def _apply_python_sizing(
+    intent: ExecutionIntent,
+    candidate_payload: dict[str, Any],
+) -> tuple[ExecutionIntent, str]:
+    """Recompute quantity/notional in Python from Sonnet's bucket choice.
+
+    Sonnet only supplies risk.stop_mult and risk.risk_budget; every derived
+    number (risk_per_share, shares, notional, stops) is computed here. When the
+    model or candidate omits sizing inputs the intent passes through unchanged
+    (legacy fixed-notional path). Returns (intent, error); a non-empty error
+    fails closed to needs_human.
+    """
+    risk_block = intent.risk if isinstance(intent.risk, dict) else None
+    if risk_block is None:
+        return intent, ""
+
+    atr14, entry_price = _candidate_sizing_inputs(candidate_payload)
+    if atr14 is None or entry_price is None:
+        # Model proposed a bucket without sizing inputs; drop the block rather
+        # than trusting model-side arithmetic.
+        return replace(intent, risk=None), ""
+
+    try:
+        stop_mult = float(risk_block.get("stop_mult"))
+        risk_budget = float(risk_block.get("risk_budget"))
+    except (TypeError, ValueError):
+        return intent, "risk block must contain numeric stop_mult and risk_budget"
+    if risk_budget <= 0 or stop_mult <= 0:
+        return intent, "risk.stop_mult and risk.risk_budget must be positive"
+    risk_budget = min(risk_budget, MAX_SONNET_RISK_BUDGET)
+
+    atr_sizing = _load_atr_sizing()
+    try:
+        sizing = atr_sizing.size_position(
+            symbol=intent.symbol,
+            entry_price=entry_price,
+            atr=atr14,
+            risk_budget=risk_budget,
+            stop_mult=stop_mult,
+        )
+    except ValueError as exc:
+        return intent, f"ATR sizing failed: {exc}"
+    if sizing.skip_recommended:
+        return intent, (
+            f"ATR bucket '{sizing.bucket}' (ATR% {sizing.atr_pct:.2f}) "
+            "recommends skipping this candidate"
+        )
+    if sizing.final_shares <= 0 or sizing.final_notional <= 0:
+        return intent, "ATR sizing produced a non-positive position"
+
+    metadata = candidate_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    regime = metadata.get("regime")
+    regime = regime if isinstance(regime, dict) else {}
+    blocks = atr_sizing.build_intent_risk_blocks(
+        sizing,
+        vix_ok=bool(regime.get("vix_ok", True)),
+        spy_trend_ok=bool(regime.get("spy_trend_ok", True)),
+    )
+    return (
+        replace(
+            intent,
+            quantity=sizing.final_shares,
+            estimated_notional=round(sizing.final_notional, 2),
+            entry=blocks["entry"],
+            risk=blocks["risk"],
+            exit_plan=blocks["exit_plan"],
+            regime_gate=blocks["regime_gate"],
+        ),
+        "",
+    )
 
 
 def _proposal_validation_intent(

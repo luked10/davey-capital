@@ -55,6 +55,10 @@ python3 scripts/smoke_cached_proposer_scaffold.py
 python3 scripts/smoke_runtime_state_scaffold.py
 python3 scripts/smoke_audit_artifacts_scaffold.py
 python3 scripts/smoke_nova_alpha_report_scaffold.py
+python3 scripts/smoke_atr_sizing.py
+python3 scripts/smoke_exit_plan.py
+python3 scripts/smoke_regime.py
+python3 scripts/smoke_trade_journal.py
 ```
 
 All smokes are deterministic and offline. A failing smoke blocks commit.

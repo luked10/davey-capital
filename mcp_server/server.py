@@ -82,6 +82,15 @@ OVERNIGHT_WATCHER_MODULE_PATH = (
 MARKET_FEED_MODULE_PATH = (
     CODE_ROOT / "autohedge" / "autohedge" / "data" / "market_feed.py"
 )
+REGIME_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "risk" / "regime.py"
+)
+EXIT_PLAN_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "runtime" / "exit_plan.py"
+)
+TRADE_JOURNAL_MODULE_PATH = (
+    CODE_ROOT / "autohedge" / "autohedge" / "audit" / "trade_journal.py"
+)
 
 
 def _load_module(name: str, path: Path):
@@ -118,6 +127,9 @@ overnight_watcher_module = _load_module(
     OVERNIGHT_WATCHER_MODULE_PATH,
 )
 market_feed_module = _load_module("davey_mcp_market_feed", MARKET_FEED_MODULE_PATH)
+regime_module = _load_module("davey_mcp_regime", REGIME_MODULE_PATH)
+exit_plan_module = _load_module("davey_mcp_exit_plan", EXIT_PLAN_MODULE_PATH)
+trade_journal_module = _load_module("davey_mcp_trade_journal", TRADE_JOURNAL_MODULE_PATH)
 
 AuditArtifactWriter = audit_module.AuditArtifactWriter
 default_runtime_state = runtime_state_module.default_runtime_state
@@ -131,6 +143,12 @@ SeenIdsStore = seen_ids_module.SeenIdsStore
 ProposalStore = proposal_store_module.ProposalStore
 OvernightArtifactWriter = overnight_watcher_module.OvernightArtifactWriter
 DeterministicTier0Watcher = overnight_watcher_module.DeterministicTier0Watcher
+ExitPlan = exit_plan_module.ExitPlan
+TradeJournal = trade_journal_module.TradeJournal
+
+# Regime snapshots newer than this are trusted for the injection gate; older
+# ones degrade to "unknown" (allow, half size, clearly labeled).
+REGIME_SNAPSHOT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 _BULLISH_KEYWORDS = frozenset({
     "surge", "soar", "jump", "rally", "beat", "record", "strong",
@@ -466,10 +484,24 @@ def _proposal_text(
 class PokeBridgeService:
     """Stateful local bridge service for one running MCP server process."""
 
-    def __init__(self, *, repo_root: Path = DAVEY_ROOT) -> None:
+    def __init__(
+        self,
+        *,
+        repo_root: Path = DAVEY_ROOT,
+        regime_provider: Any | None = None,
+    ) -> None:
         self.repo_root = Path(repo_root)
         self.seen_ids = SeenIdsStore(davey_root=self.repo_root)
         self.proposal_store = ProposalStore(davey_root=self.repo_root)
+        # Injectable for deterministic smokes; default reads the repo-backed
+        # snapshot the scheduler cycle stores in runtime_state.json (no
+        # network call on the injection path).
+        self._regime_provider = regime_provider
+        try:
+            self.trade_journal: Any | None = TradeJournal(davey_root=self.repo_root)
+        except Exception as exc:
+            self.trade_journal = None
+            print(f"TradeJournal startup failed (non-blocking): {exc}", flush=True)
         try:
             existing = self.proposal_store.count_proposals()
         except Exception as exc:
@@ -804,6 +836,20 @@ class PokeBridgeService:
                     "(sonnet_success)",
                     flush=True,
                 )
+                self._journal_event(
+                    event_type="proposal_created",
+                    symbol=candidate["symbol"],
+                    side=str(candidate.get("side") or "") or None,
+                    payload={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent.intent_id,
+                        "quantity": intent.quantity,
+                        "estimated_notional": intent.estimated_notional,
+                        "risk": intent.risk,
+                        "exit_plan": intent.exit_plan,
+                        "dry_run": intent.dry_run,
+                    },
+                )
             else:
                 rationale = (
                     proposal_result.error
@@ -908,18 +954,42 @@ class PokeBridgeService:
         )
         return f"Approval for {handoff_id} blocked: {reason}"
 
-    def _update_runtime_state_after_fill(self, fill: FillRecord) -> None:
+    def _update_runtime_state_after_fill(
+        self,
+        fill: FillRecord,
+        intent: ExecutionIntent | None = None,
+        *,
+        handoff_id: str = "",
+        thesis: str = "",
+    ) -> None:
         result = load_runtime_state(self.repo_root / "runtime_state.json")
         state = result.state if result.ok and result.state is not None else default_runtime_state()
         state.active_broker = "alpaca"
         state.dry_run = fill.dry_run
         state.live_mode = _live_mode_enabled()
         state.circuit_breaker_status = "normal"
+        previous_summary = (
+            dict(state.positions_summary)
+            if isinstance(state.positions_summary, dict)
+            else {}
+        )
+        positions = dict(previous_summary.get("positions") or {})
+        positions = self._record_position_from_fill(
+            positions,
+            fill,
+            intent,
+            handoff_id=handoff_id,
+            thesis=thesis,
+        )
         state.positions_summary = {
-            "open_positions": 0,
+            "open_positions": len(positions),
             "source": "alpaca fill artifact",
             "latest_fill": audit_module.to_dict(fill),
+            "positions": positions,
+            "cooldowns": dict(previous_summary.get("cooldowns") or {}),
         }
+        if "regime" in previous_summary:
+            state.positions_summary["regime"] = previous_summary["regime"]
         state.latest_signal_ids = [fill.intent_id]
         state.last_error = ""
         state.last_health_check = _utc_now_iso()
@@ -927,6 +997,69 @@ class PokeBridgeService:
             state,
             self.repo_root / "runtime_state.json",
         )
+
+    def _record_position_from_fill(
+        self,
+        positions: dict[str, Any],
+        fill: FillRecord,
+        intent: ExecutionIntent | None,
+        *,
+        handoff_id: str = "",
+        thesis: str = "",
+    ) -> dict[str, Any]:
+        """Track a filled buy as an open position with its exit plan.
+
+        Sells clear the tracked position. Buys without ATR/exit blocks are
+        recorded without an exit plan (the monitor skips them and they surface
+        in get_open_positions for human attention).
+        """
+        symbol = str(fill.symbol or "").strip().upper()
+        if not symbol:
+            return positions
+        side = str(fill.side or "").strip().lower()
+        if side == "sell":
+            positions.pop(symbol, None)
+            return positions
+        if side != "buy":
+            return positions
+
+        entry_price = fill.price if isinstance(fill.price, (int, float)) else None
+        risk_block = intent.risk if intent is not None and isinstance(intent.risk, dict) else {}
+        exit_block = (
+            intent.exit_plan if intent is not None and isinstance(intent.exit_plan, dict) else {}
+        )
+        entry_date = _utc_now_iso()[:10]
+        exit_plan_dict: dict[str, Any] | None = None
+        if entry_price and risk_block.get("atr14") and risk_block.get("stop_mult"):
+            try:
+                plan = ExitPlan(
+                    symbol=symbol,
+                    entry_price=float(entry_price),
+                    atr=float(risk_block["atr14"]),
+                    stop_mult=float(risk_block["stop_mult"]),
+                    tp1_r=float(exit_block.get("tp1_r", 1.5) or 1.5),
+                    trail_mult=float(exit_block.get("trail_mult", 2.5) or 2.5),
+                    max_holding_days=int(exit_block.get("max_holding_days", 5) or 5),
+                    entry_date=entry_date,
+                )
+                exit_plan_dict = plan.to_dict()
+            except (TypeError, ValueError) as exc:
+                print(
+                    f"exit plan build failed for {symbol} (non-blocking): {exc}",
+                    flush=True,
+                )
+        positions[symbol] = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "entry_date": entry_date,
+            "quantity": fill.quantity,
+            "atr": risk_block.get("atr14"),
+            "exit_plan": exit_plan_dict,
+            "original_thesis": thesis,
+            "original_handoff_id": handoff_id,
+            "intent_id": fill.intent_id,
+        }
+        return positions
 
     def record_approval_decision(
         self,
@@ -939,7 +1072,11 @@ class PokeBridgeService:
         found = self._find_handoff(handoff_id)
         if found is None:
             raise ValueError(f"handoff_id not found or invalid: {handoff_id}")
-        _, session_id = found
+        handoff, session_id = found
+        handoff_metadata = (
+            handoff.get("metadata") if isinstance(handoff.get("metadata"), dict) else {}
+        )
+        original_thesis = str(handoff_metadata.get("thesis", "") or "")
         writer = AuditArtifactWriter(
             session_id=session_id,
             artifact_root=self.audit_root,
@@ -1089,6 +1226,17 @@ class PokeBridgeService:
                         reason=f"broker order conversion failed: {exc}",
                     )
 
+                order_event_id = self._journal_event(
+                    event_type="order_submitted",
+                    symbol=normalized_intent.symbol,
+                    side=normalized_intent.side,
+                    payload={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent_id,
+                        "order": order_payload,
+                        "approved_by": approved_by,
+                    },
+                )
                 try:
                     fill = AlpacaLiveBroker(
                         session_id=session_id,
@@ -1131,7 +1279,34 @@ class PokeBridgeService:
                         flush=True,
                     )
 
-                self._update_runtime_state_after_fill(fill)
+                self._update_runtime_state_after_fill(
+                    fill,
+                    normalized_intent,
+                    handoff_id=handoff_id,
+                    thesis=original_thesis,
+                )
+                self._journal_event(
+                    event_type="filled",
+                    symbol=fill.symbol,
+                    side=fill.side,
+                    parent_event_id=order_event_id,
+                    payload={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent_id,
+                        "fill": audit_module.to_dict(fill),
+                    },
+                )
+                self._journal_event(
+                    event_type="human_approved",
+                    symbol=fill.symbol,
+                    side=fill.side,
+                    payload={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent_id,
+                        "approved_by": approved_by,
+                        "mode": "live",
+                    },
+                )
                 writer.append_approval_decision(
                     handoff_id=handoff_id,
                     approved=True,
@@ -1158,7 +1333,21 @@ class PokeBridgeService:
             intent_id=intent_id,
             reason="" if approved else "rejected by human approval gate",
         )
+        journal_symbol = str(handoff_metadata.get("symbol", "") or "").strip().upper()
+        journal_side = str(handoff_metadata.get("side", "") or "").strip().lower() or None
         if approved:
+            if journal_symbol:
+                self._journal_event(
+                    event_type="human_approved",
+                    symbol=journal_symbol,
+                    side=journal_side,
+                    payload={
+                        "handoff_id": handoff_id,
+                        "intent_id": intent_id,
+                        "approved_by": approved_by,
+                        "mode": "dry_run",
+                    },
+                )
             print(
                 f"approval path: dry-run audit only for {handoff_id}; "
                 "no broker order created",
@@ -1168,6 +1357,16 @@ class PokeBridgeService:
             return (
                 f"Approved {handoff_id}; wrote dry-run approved intent artifact "
                 f"{intent_id}. No broker order was created."
+            )
+        if journal_symbol:
+            self._journal_event(
+                event_type="human_rejected",
+                symbol=journal_symbol,
+                side=journal_side,
+                payload={
+                    "handoff_id": handoff_id,
+                    "approved_by": approved_by,
+                },
             )
         print(
             f"approval path: rejected by human approval gate for {handoff_id}",
@@ -1356,6 +1555,106 @@ class PokeBridgeService:
             ),
         }
 
+    def _journal_event(
+        self,
+        *,
+        event_type: str,
+        symbol: str,
+        payload: dict[str, Any],
+        side: str | None = None,
+        parent_event_id: int | None = None,
+    ) -> int | None:
+        """Best-effort append to the immutable trade journal; never raises."""
+        if self.trade_journal is None:
+            return None
+        try:
+            row = self.trade_journal.record_event(
+                event_type=event_type,
+                symbol=symbol,
+                payload=payload,
+                side=side,
+                parent_event_id=parent_event_id,
+            )
+            return row.get("id")
+        except Exception as exc:
+            print(
+                f"trade journal write failed safely ({event_type}): {exc}",
+                flush=True,
+            )
+            return None
+
+    def _positions_summary(self) -> dict[str, Any]:
+        result = load_runtime_state(self.repo_root / "runtime_state.json")
+        if result.ok and result.state is not None and isinstance(
+            result.state.positions_summary, dict
+        ):
+            return dict(result.state.positions_summary)
+        return {}
+
+    def _current_regime(self) -> dict[str, Any]:
+        """Regime for the injection gate: injected provider, else the fresh
+        repo-backed snapshot from runtime_state.json, else 'unknown'."""
+        if self._regime_provider is not None:
+            try:
+                snapshot = self._regime_provider()
+                if isinstance(snapshot, dict):
+                    return snapshot
+            except Exception as exc:
+                return regime_module.unknown_regime(f"regime provider failed: {exc}")
+        snapshot = self._positions_summary().get("regime")
+        if not isinstance(snapshot, dict) or "allow_new_longs" not in snapshot:
+            return regime_module.unknown_regime("no stored regime snapshot")
+        snapshot_at = str(snapshot.get("snapshot_at", "") or "")
+        try:
+            stamped = datetime.fromisoformat(snapshot_at.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - stamped).total_seconds()
+            if age > REGIME_SNAPSHOT_MAX_AGE_SECONDS:
+                return regime_module.unknown_regime(
+                    f"stored regime snapshot is stale ({snapshot_at})"
+                )
+        except ValueError:
+            return regime_module.unknown_regime("stored regime snapshot has no timestamp")
+        return snapshot
+
+    def _cooldown_for_symbol(self, symbol: str) -> dict[str, Any] | None:
+        cooldowns = self._positions_summary().get("cooldowns")
+        if not isinstance(cooldowns, dict):
+            return None
+        entry = cooldowns.get(symbol)
+        if not isinstance(entry, dict):
+            return None
+        until = str(entry.get("until", "") or "")
+        if exit_plan_module.is_cooldown_active(until):
+            return {"until": until, "reason": str(entry.get("reason", "") or "")}
+        return None
+
+    def _set_cooldown(self, symbol: str, *, reason: str) -> str:
+        """Persist a cooldown into runtime_state.json (atomic write)."""
+        until = exit_plan_module.cooldown_until(reason=reason)
+        try:
+            result = load_runtime_state(self.repo_root / "runtime_state.json")
+            state = (
+                result.state
+                if result.ok and result.state is not None
+                else default_runtime_state()
+            )
+            summary = (
+                dict(state.positions_summary)
+                if isinstance(state.positions_summary, dict)
+                else {}
+            )
+            cooldowns = dict(summary.get("cooldowns") or {})
+            cooldowns[symbol] = {"until": until, "reason": reason}
+            summary["cooldowns"] = cooldowns
+            state.positions_summary = summary
+            runtime_state_module.save_runtime_state(
+                state,
+                self.repo_root / "runtime_state.json",
+            )
+        except Exception as exc:
+            print(f"cooldown write failed safely for {symbol}: {exc}", flush=True)
+        return until
+
     def inject_researched_candidate(
         self,
         symbol: str,
@@ -1378,6 +1677,14 @@ class PokeBridgeService:
         trigger_reason = str(trigger_reason or "").strip()
 
         universe = frozenset(market_feed_module.ALL_SYMBOLS)
+        data_only = frozenset(
+            getattr(market_feed_module, "DATA_ONLY_SYMBOLS", ("SPY", "^VIX"))
+        )
+        if symbol in data_only:
+            return {
+                "queued": False,
+                "error": f"symbol {symbol!r} is data-only (regime input), never tradeable",
+            }
         if symbol not in universe:
             return {"queued": False, "error": f"symbol {symbol!r} not in ticker universe"}
         if direction not in {"buy", "sell"}:
@@ -1391,6 +1698,45 @@ class PokeBridgeService:
             return {"queued": False, "error": "confidence must be a number"}
         if not (0.0 <= confidence_val <= 1.0):
             return {"queued": False, "error": "confidence must be within [0, 1]"}
+
+        # Cooldown gate: symbols recently stopped out or regime-rejected wait.
+        cooldown = self._cooldown_for_symbol(symbol)
+        if cooldown is not None:
+            return {
+                "queued": False,
+                "error": (
+                    f"symbol {symbol} is cooling down until {cooldown['until']} "
+                    f"({cooldown['reason']})"
+                ),
+                "cooldown": cooldown,
+            }
+
+        # Regime gate (new longs only): rejected buys log regime_suppressed and
+        # apply a 1-day cooldown. Sells are exits and always pass this gate.
+        regime_snapshot = self._current_regime()
+        regime_event_id = self._journal_event(
+            event_type="regime_checked",
+            symbol=symbol,
+            payload={
+                "regime": regime_snapshot,
+                "direction": direction,
+                "stage": "inject_researched_candidate",
+            },
+        )
+        if direction == "buy" and regime_snapshot.get("allow_new_longs") is False:
+            until = self._set_cooldown(symbol, reason="regime_suppressed")
+            print(
+                f"regime_suppressed: rejected {symbol} buy injection "
+                f"({regime_snapshot.get('regime')}: {regime_snapshot.get('reason')})",
+                flush=True,
+            )
+            return {
+                "queued": False,
+                "error": "regime_suppressed",
+                "reason": "regime_suppressed",
+                "regime": regime_snapshot,
+                "cooldown": {"until": until, "reason": "regime_suppressed"},
+            }
 
         # Circuit breaker gate — fail closed. A tripped breaker blocks queuing so
         # nothing unsafe ever reaches Sonnet.
@@ -1461,6 +1807,20 @@ class PokeBridgeService:
         if not enqueued:
             return {"queued": False, "error": "handoff failed local schema validation"}
 
+        self._journal_event(
+            event_type="candidate_injected",
+            symbol=symbol,
+            side=direction,
+            parent_event_id=regime_event_id,
+            payload={
+                "handoff_id": handoff_id,
+                "confidence": confidence_val,
+                "thesis": thesis,
+                "trigger_reason": trigger_reason,
+                "regime": regime_snapshot.get("regime"),
+                "source": "poke_research",
+            },
+        )
         print(
             f"poke research injected: {handoff_id} {symbol} {direction} "
             f"confidence={confidence_val} (composite bypassed)",
@@ -1593,6 +1953,100 @@ class PokeBridgeService:
             )
         except Exception as exc:
             return f"Daily report unavailable: {exc}"
+
+    def get_open_positions(self) -> dict[str, Any]:
+        """Return tracked open positions with exit-plan state and PnL.
+
+        Reads the repo-backed runtime_state.json position records; current
+        prices are best-effort yfinance reads and null when unavailable.
+        """
+        summary = self._positions_summary()
+        positions = summary.get("positions")
+        positions = positions if isinstance(positions, dict) else {}
+
+        def _current_price(symbol: str) -> float | None:
+            try:
+                import yfinance as yf
+
+                price = float(yf.Ticker(symbol).fast_info["last_price"])
+                return price if price == price and price > 0 else None
+            except Exception:
+                return None
+
+        rows: list[dict[str, Any]] = []
+        for symbol in sorted(positions):
+            entry = positions[symbol]
+            if not isinstance(entry, dict):
+                continue
+            entry_price = entry.get("entry_price")
+            current_price = _current_price(symbol)
+            unrealized_pnl_pct: float | None = None
+            if (
+                isinstance(entry_price, (int, float))
+                and entry_price
+                and current_price is not None
+            ):
+                unrealized_pnl_pct = round(
+                    (current_price - float(entry_price)) / float(entry_price) * 100.0,
+                    4,
+                )
+            exit_plan_dict = entry.get("exit_plan")
+            exit_state = (
+                str(exit_plan_dict.get("state", ""))
+                if isinstance(exit_plan_dict, dict)
+                else ""
+            )
+            days_held = 0
+            entry_date = str(entry.get("entry_date", "") or "")
+            if entry_date:
+                try:
+                    entered = datetime.fromisoformat(entry_date[:10]).date()
+                    days_held = max(
+                        0, (datetime.now(timezone.utc).date() - entered).days
+                    )
+                except ValueError:
+                    days_held = 0
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                    "exit_plan_state": exit_state,
+                    "exit_plan": exit_plan_dict,
+                    "original_thesis": str(entry.get("original_thesis", "") or ""),
+                    "original_handoff_id": str(
+                        entry.get("original_handoff_id", "") or ""
+                    ),
+                    "days_held": days_held,
+                }
+            )
+        return {
+            "open_positions": len(rows),
+            "positions": rows,
+            "cooldowns": dict(summary.get("cooldowns") or {}),
+            "regime": summary.get("regime"),
+            "snapshot_at": _utc_now_iso(),
+        }
+
+    def get_trade_journal(
+        self,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Read recent immutable trade journal events (newest first)."""
+        if self.trade_journal is None:
+            return {"events": [], "error": "trade journal unavailable"}
+        try:
+            events = self.trade_journal.get_events(symbol=symbol, limit=limit)
+        except Exception as exc:
+            return {"events": [], "error": str(exc)}
+        return {
+            "events": events,
+            "count": len(events),
+            "symbol": str(symbol or "") or None,
+            "db_path": str(self.trade_journal.db_path),
+        }
 
     def mcp_inject_researched_candidate(
         self,
@@ -1727,6 +2181,14 @@ def mcp_inject_researched_candidate(
     )
 
 
+def get_open_positions() -> dict[str, Any]:
+    return SERVICE.get_open_positions()
+
+
+def get_trade_journal(symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
+    return SERVICE.get_trade_journal(symbol=symbol, limit=limit)
+
+
 def build_mcp_app():
     """Build the MCP app lazily so offline imports do not require mcp."""
     try:
@@ -1746,6 +2208,8 @@ def build_mcp_app():
     app.tool()(get_market_overview)
     app.tool()(inject_researched_candidate)
     app.tool()(mcp_inject_researched_candidate)
+    app.tool()(get_open_positions)
+    app.tool()(get_trade_journal)
     return app
 
 

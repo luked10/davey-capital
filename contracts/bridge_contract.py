@@ -60,6 +60,14 @@ class ExecutionIntent:
     approved_at: str = ""
     status: str = "pending"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Structured sizing/exit blocks (ATR-based sizing pipeline). Optional for
+    # backwards compatibility; when present they are validated as dicts with
+    # the expected numeric fields. Python computes every number in these
+    # blocks — the proposal model only ever chooses stop_mult + risk_budget.
+    entry: dict[str, Any] | None = None
+    risk: dict[str, Any] | None = None
+    exit_plan: dict[str, Any] | None = None
+    regime_gate: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -206,6 +214,49 @@ def _strict_bool(value: Any, *, field_name: str, reasons: list[str]) -> bool | N
     return None
 
 
+_SIZING_BLOCK_NUMERIC_FIELDS: dict[str, tuple[str, ...]] = {
+    "entry": ("max_notional",),
+    "risk": ("atr14", "stop_mult", "risk_per_share"),
+    "exit_plan": ("initial_stop", "tp1_r", "trail_mult"),
+}
+
+
+def _validate_sizing_blocks(intent: ExecutionIntent, reasons: list[str]) -> None:
+    """Validate the optional entry/risk/exit_plan/regime_gate blocks when present."""
+    for block_name in ("entry", "risk", "exit_plan", "regime_gate"):
+        block = getattr(intent, block_name, None)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            reasons.append(f"{block_name} must be a dict when provided")
+            continue
+        for field_name in _SIZING_BLOCK_NUMERIC_FIELDS.get(block_name, ()):
+            if field_name not in block:
+                reasons.append(f"{block_name}.{field_name} is required")
+                continue
+            value = _positive_float(block.get(field_name))
+            if value is None or value <= 0:
+                reasons.append(f"{block_name}.{field_name} must be positive")
+
+    risk_block = intent.risk
+    if isinstance(risk_block, dict) and "cooldown_days" in risk_block:
+        cooldown = risk_block.get("cooldown_days")
+        if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
+            reasons.append("risk.cooldown_days must be a non-negative integer")
+
+    exit_block = intent.exit_plan
+    if isinstance(exit_block, dict) and "max_holding_days" in exit_block:
+        holding = exit_block.get("max_holding_days")
+        if isinstance(holding, bool) or not isinstance(holding, int) or holding <= 0:
+            reasons.append("exit_plan.max_holding_days must be a positive integer")
+
+    gate = intent.regime_gate
+    if isinstance(gate, dict):
+        for gate_field in ("vix_ok", "spy_trend_ok"):
+            if gate_field in gate and not isinstance(gate.get(gate_field), bool):
+                reasons.append(f"regime_gate.{gate_field} must be boolean")
+
+
 def validate_execution_intent(
     intent: ExecutionIntent,
     risk: RiskSummary | None = None,
@@ -249,6 +300,8 @@ def validate_execution_intent(
         limit_price = _positive_float(intent.limit_price)
         if limit_price is None or limit_price <= 0:
             reasons.append("limit_price must be positive for limit order")
+
+    _validate_sizing_blocks(intent, reasons)
 
     if dry_run is False:
         if approved is not True:

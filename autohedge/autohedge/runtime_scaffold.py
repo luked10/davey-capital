@@ -25,11 +25,16 @@ SCHEDULER_JOB_ID = "tier0-market-feed-watcher"
 DAILY_REPORT_JOB_ID = "nova-alpha-daily-report"
 DAILY_REPORT_UTC_HOUR = 21
 DAILY_REPORT_UTC_MINUTE = 0
+POSITION_MONITOR_JOB_ID = "position-monitor"
+POSITION_MONITOR_INTERVAL_SECONDS = SCHEDULER_INTERVAL_SECONDS
 _ACTIVE_SCHEDULER: Any | None = None
 _RUNTIME_STATE_MODULE: Any | None = None
 _REPORT_MODULE: Any | None = None
 _CIRCUIT_BREAKER_MODULE: Any | None = None
 _OBSERVATIONS_MODULE: Any | None = None
+_EXIT_PLAN_MODULE: Any | None = None
+_REGIME_MODULE: Any | None = None
+_TRADE_JOURNAL_MODULE: Any | None = None
 
 
 def _utc_now_compact() -> str:
@@ -61,6 +66,11 @@ def scheduler_enabled_from_env() -> bool:
 def live_mode_enabled_from_env() -> bool:
     """Execution-mode gate; still separate from real-money Alpaca trading."""
     return os.getenv("DAVEY_LIVE_MODE", "").strip() == "1"
+
+
+def position_monitor_enabled_from_env() -> bool:
+    """Opt-in position monitor gate; disabled unless explicitly set to ``1``."""
+    return os.getenv("DAVEY_POSITION_MONITOR_ENABLED", "").strip() == "1"
 
 
 def _is_us_equity_market_open() -> bool:
@@ -149,6 +159,11 @@ def _load_runtime_state_module():
         )
     _RUNTIME_STATE_MODULE = runtime_state
     return runtime_state
+
+
+def atomic_write_json(path: str | Path, payload: Any) -> Path:
+    """Atomic JSON write (temp file -> fsync -> os.replace); see runtime_state."""
+    return _load_runtime_state_module().atomic_write_json(path, payload)
 
 
 def write_runtime_state(
@@ -261,6 +276,54 @@ def _scheduler_circuit_breaker_status(repo_root: Path, symbol: str = "") -> str:
         return "blocked"
 
 
+def _load_exit_plan_module():
+    global _EXIT_PLAN_MODULE
+
+    if _EXIT_PLAN_MODULE is not None:
+        return _EXIT_PLAN_MODULE
+    try:
+        from autohedge.runtime import exit_plan
+    except Exception:
+        exit_plan = _load_local_module(
+            "davey_runtime_exit_plan",
+            "runtime/exit_plan.py",
+        )
+    _EXIT_PLAN_MODULE = exit_plan
+    return exit_plan
+
+
+def _load_regime_module():
+    global _REGIME_MODULE
+
+    if _REGIME_MODULE is not None:
+        return _REGIME_MODULE
+    try:
+        from autohedge.risk import regime
+    except Exception:
+        regime = _load_local_module(
+            "davey_runtime_regime",
+            "risk/regime.py",
+        )
+    _REGIME_MODULE = regime
+    return regime
+
+
+def _load_trade_journal_module():
+    global _TRADE_JOURNAL_MODULE
+
+    if _TRADE_JOURNAL_MODULE is not None:
+        return _TRADE_JOURNAL_MODULE
+    try:
+        from autohedge.audit import trade_journal
+    except Exception:
+        trade_journal = _load_local_module(
+            "davey_runtime_trade_journal",
+            "audit/trade_journal.py",
+        )
+    _TRADE_JOURNAL_MODULE = trade_journal
+    return trade_journal
+
+
 def _load_watcher_classes():
     try:
         from autohedge.overnight_scaffold import (
@@ -295,9 +358,17 @@ def run_watcher_cycle(
     run_id: str | None = None,
     repo_root: str | Path | None = None,
     fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+    regime_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Fetch local market candidates and hand them to the deterministic watcher."""
-    if not _is_us_equity_market_open():
+    """Fetch local market candidates and hand them to the deterministic watcher.
+
+    The market-hours gate and the network-backed regime snapshot only apply to
+    the real market feed (``fetcher is None``); injected fetchers run offline
+    and deterministically unless an explicit ``regime_provider`` is supplied.
+    When the regime disallows new longs, buy candidates are suppressed with
+    reason "regime_suppressed" before they can reach the Poke queue.
+    """
+    if fetcher is None and not _is_us_equity_market_open():
         print(f"skipping watcher cycle at {datetime.now().isoformat()}: US equity market is closed", flush=True)
         return {"status": "skipped", "reason": "market_closed"}
 
@@ -315,12 +386,56 @@ def run_watcher_cycle(
     fetch_candidates = fetcher or _load_fetch_candidates()
     DeterministicTier0Watcher, OvernightArtifactWriter = _load_watcher_classes()
 
+    # Regime check at the start of every cycle (spec: Module 4). Offline runs
+    # with an injected fetcher skip the network fetch unless a provider is
+    # injected too.
+    regime_snapshot: dict[str, Any] | None = None
+    try:
+        if regime_provider is not None:
+            regime_snapshot = regime_provider()
+        elif fetcher is None:
+            regime_snapshot = _load_regime_module().get_regime_snapshot()
+    except Exception as exc:
+        print(f"regime snapshot failed safely: {exc}", flush=True)
+        regime_snapshot = None
+    if regime_snapshot is not None:
+        try:
+            _load_trade_journal_module().TradeJournal(davey_root=root).record_event(
+                event_type="regime_checked",
+                symbol="SPY",
+                payload={"regime": regime_snapshot, "run_id": clean_run_id},
+            )
+        except Exception as exc:
+            print(f"regime journal write failed safely: {exc}", flush=True)
+
     fetch_error = ""
     try:
         payloads = fetch_candidates()
     except Exception as exc:
         fetch_error = str(exc)
         payloads = []
+
+    regime_suppressed_count = 0
+    if (
+        isinstance(regime_snapshot, dict)
+        and regime_snapshot.get("allow_new_longs") is False
+    ):
+        kept_payloads = []
+        for payload in payloads:
+            if (
+                isinstance(payload, dict)
+                and str(payload.get("side", "")).strip().lower() == "buy"
+            ):
+                regime_suppressed_count += 1
+                print(
+                    "regime_suppressed: dropping buy candidate "
+                    f"{payload.get('symbol')!r} ({regime_snapshot.get('regime')}: "
+                    f"{regime_snapshot.get('reason')})",
+                    flush=True,
+                )
+            else:
+                kept_payloads.append(payload)
+        payloads = kept_payloads
     writer = OvernightArtifactWriter(
         session_id=clean_session_id,
         artifact_root=root / "logs" / "overnight",
@@ -337,8 +452,8 @@ def run_watcher_cycle(
         status_symbol = str(payloads[0].get("symbol", "")).strip().upper()
     runtime_state_path_written = ""
     try:
-        default_runtime_state = _load_runtime_state_helpers()
-        state = default_runtime_state()
+        runtime_state = _load_runtime_state_module()
+        state = runtime_state.load_runtime_state_or_default(runtime_state_path(root))
         state.live_mode = live_mode_enabled_from_env()
         state.dry_run = not state.live_mode
         state.active_broker = "alpaca" if state.live_mode else "paper"
@@ -346,10 +461,19 @@ def run_watcher_cycle(
             root,
             status_symbol,
         )
+        # Preserve position/cooldown bookkeeping owned by the position monitor.
+        previous_summary = (
+            state.positions_summary if isinstance(state.positions_summary, dict) else {}
+        )
+        positions = dict(previous_summary.get("positions") or {})
         state.positions_summary = {
-            "open_positions": 0,
+            "open_positions": len(positions),
             "source": "repo-backed audit artifacts",
+            "positions": positions,
+            "cooldowns": dict(previous_summary.get("cooldowns") or {}),
         }
+        if regime_snapshot is not None:
+            state.positions_summary["regime"] = regime_snapshot
         state.latest_signal_ids = [
             str(payload.get("signal_id", "") or payload.get("event_id", ""))
             for payload in payloads
@@ -365,10 +489,254 @@ def run_watcher_cycle(
     result["artifact_dir"] = str(writer.artifact_dir)
     result["fetch_error"] = fetch_error
     result["runtime_state_path"] = runtime_state_path_written
+    result["regime"] = regime_snapshot
+    result["regime_suppressed_count"] = regime_suppressed_count
     print(
         "scheduler cycle complete: "
         f"run_id={clean_run_id} candidates={len(payloads)} "
         f"runtime_state_path={runtime_state_path_written} error={fetch_error!r}",
+        flush=True,
+    )
+    return result
+
+
+def _default_price_fetcher(symbol: str) -> float | None:
+    """Best-effort last price from yfinance; None on any failure."""
+    try:
+        import yfinance as yf
+
+        price = float(yf.Ticker(symbol).fast_info["last_price"])
+        return price if price == price and price > 0 else None
+    except Exception:
+        return None
+
+
+def _journal_event_safe(
+    journal: Any,
+    *,
+    event_type: str,
+    symbol: str,
+    payload: dict[str, Any],
+    side: str | None = None,
+) -> None:
+    if journal is None:
+        return
+    try:
+        journal.record_event(
+            event_type=event_type,
+            symbol=symbol,
+            payload=payload,
+            side=side,
+        )
+    except Exception as exc:
+        print(f"trade journal write failed safely ({event_type}): {exc}", flush=True)
+
+
+def _inject_exit_sell_candidate(
+    *,
+    root: Path,
+    symbol: str,
+    action: str,
+    plan_dict: dict[str, Any],
+    position: dict[str, Any],
+    session_id: str,
+) -> dict[str, Any]:
+    """Queue a sell candidate for Poke approval (TP1 / trailing / time stop).
+
+    This is the approval path: nothing executes until a human approves. Only
+    the hard stop bypasses this queue.
+    """
+    DeterministicTier0Watcher, OvernightArtifactWriter = _load_watcher_classes()
+    writer = OvernightArtifactWriter(
+        session_id=session_id,
+        artifact_root=root / "logs" / "overnight",
+    )
+    watcher = DeterministicTier0Watcher(
+        run_id=f"position-monitor-{_utc_now_compact()}",
+        writer=writer,
+        dry_run=True,
+        enable_poke_handoff=True,
+    )
+    return watcher.process_payload(
+        {
+            "symbol": symbol,
+            "side": "sell",
+            "confidence": 0.95,
+            "strategy": "exit_plan_monitor",
+            "source": "position_monitor",
+            "dry_run": True,
+            "metadata": {
+                "exit_action": action,
+                "exit_reason": plan_dict.get("last_reason", ""),
+                "exit_state": plan_dict.get("state", ""),
+                "entry_price": position.get("entry_price"),
+                "original_thesis": position.get("original_thesis", ""),
+                "original_handoff_id": position.get("original_handoff_id", ""),
+            },
+        }
+    )
+
+
+def run_position_monitor(
+    *,
+    repo_root: str | Path | None = None,
+    session_id: str | None = None,
+    price_fetcher: Callable[[str], float | None] | None = None,
+    journal: Any | None = None,
+    as_of: Any | None = None,
+) -> dict[str, Any]:
+    """Evaluate every open position's exit plan against current prices.
+
+    Actions per position:
+      exit_stop      -> the ONLY no-approval path: journal stop_hit, close the
+                        position record immediately, apply a 2-trading-day
+                        cooldown. Live broker submission (when enabled) is
+                        routed through the approval-exempt hard-stop record;
+                        this scaffold never places orders itself.
+      take_profit_1 /
+      exit_trailing  -> inject a sell candidate into the Poke queue for human
+                        approval; the position record stays until it closes.
+      hold           -> refresh peak_price in runtime_state.json.
+
+    All writes to runtime_state.json are atomic. Prices come from the injected
+    ``price_fetcher`` (offline smokes) or yfinance (runtime).
+    """
+    root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
+    clean_session_id = (
+        session_id
+        or os.getenv("DAVEY_SESSION_ID", "").strip()
+        or "position-monitor"
+    )
+    fetch_price = price_fetcher or _default_price_fetcher
+    exit_plan_module = _load_exit_plan_module()
+    runtime_state = _load_runtime_state_module()
+
+    if journal is None:
+        try:
+            journal = _load_trade_journal_module().TradeJournal(davey_root=root)
+        except Exception as exc:
+            print(f"trade journal unavailable (non-blocking): {exc}", flush=True)
+            journal = None
+
+    state = runtime_state.load_runtime_state_or_default(runtime_state_path(root))
+    summary = state.positions_summary if isinstance(state.positions_summary, dict) else {}
+    positions: dict[str, Any] = dict(summary.get("positions") or {})
+    cooldowns: dict[str, Any] = dict(summary.get("cooldowns") or {})
+
+    actions: list[dict[str, Any]] = []
+    for symbol in sorted(positions):
+        position = positions[symbol]
+        if not isinstance(position, dict):
+            actions.append({"symbol": symbol, "action": "skipped", "reason": "malformed position entry"})
+            continue
+        try:
+            plan = exit_plan_module.ExitPlan.from_dict(position.get("exit_plan") or {})
+        except (ValueError, KeyError) as exc:
+            actions.append({"symbol": symbol, "action": "skipped", "reason": f"malformed exit plan: {exc}"})
+            continue
+        if plan.state is exit_plan_module.ExitState.EXITED:
+            actions.append({"symbol": symbol, "action": "skipped", "reason": "already exited"})
+            continue
+        price = fetch_price(symbol)
+        if price is None:
+            actions.append({"symbol": symbol, "action": "skipped", "reason": "no price available"})
+            continue
+
+        action = plan.update(price, as_of=as_of)
+        plan_dict = plan.to_dict()
+        position["exit_plan"] = plan_dict
+        record = {
+            "symbol": symbol,
+            "action": action,
+            "price": price,
+            "unrealized_pnl_pct": round(plan.unrealized_pnl_pct(price), 4),
+            "reason": plan.last_reason,
+            "state": plan_dict["state"],
+        }
+
+        if action == "exit_stop":
+            # Hard stop: immediate, no Poke approval — journal + audit + close.
+            _journal_event_safe(
+                journal,
+                event_type="stop_hit",
+                symbol=symbol,
+                side="sell",
+                payload={**record, "approval_bypassed": True, "path": "hard_stop"},
+            )
+            _journal_event_safe(
+                journal,
+                event_type="exit_triggered",
+                symbol=symbol,
+                side="sell",
+                payload={**record, "requires_approval": False},
+            )
+            _journal_event_safe(
+                journal,
+                event_type="closed",
+                symbol=symbol,
+                side="sell",
+                payload={**record, "closed_by": "position_monitor_hard_stop"},
+            )
+            cooldowns[symbol] = {
+                "until": exit_plan_module.cooldown_until(reason="stop_out"),
+                "reason": "stop_out",
+            }
+            del positions[symbol]
+        elif action in ("take_profit_1", "exit_trailing"):
+            event_type = "take_profit" if action == "take_profit_1" else "trailing_exit"
+            _journal_event_safe(
+                journal,
+                event_type=event_type,
+                symbol=symbol,
+                side="sell",
+                payload={**record, "requires_approval": True},
+            )
+            _journal_event_safe(
+                journal,
+                event_type="exit_triggered",
+                symbol=symbol,
+                side="sell",
+                payload={**record, "requires_approval": True},
+            )
+            try:
+                injection = _inject_exit_sell_candidate(
+                    root=root,
+                    symbol=symbol,
+                    action=action,
+                    plan_dict=plan_dict,
+                    position=position,
+                    session_id=clean_session_id,
+                )
+                record["handoff"] = injection
+            except Exception as exc:
+                record["handoff"] = {"status": "error", "reason": str(exc)}
+        actions.append(record)
+
+    state.positions_summary = {
+        **summary,
+        "open_positions": len(positions),
+        "positions": positions,
+        "cooldowns": cooldowns,
+        "last_position_monitor_at": _utc_now_iso(),
+    }
+    state.last_health_check = _utc_now_iso()
+    written_path = ""
+    try:
+        written_path = str(
+            runtime_state.save_runtime_state(state, runtime_state_path(root))
+        )
+    except Exception as exc:
+        print(f"position monitor state write failed safely: {exc}", flush=True)
+
+    result = {
+        "status": "ok",
+        "checked": len(actions),
+        "open_positions": len(positions),
+        "actions": actions,
+        "runtime_state_path": written_path,
+    }
+    print(
+        f"position monitor complete: checked={len(actions)} open={len(positions)}",
         flush=True,
     )
     return result
@@ -447,6 +815,7 @@ def build_scheduler(
     repo_root: str | Path | None = None,
     session_id: str | None = None,
     prefer_apscheduler: bool = True,
+    position_monitor_enabled: bool | None = None,
 ) -> LocalSchedulerScaffold:
     scheduler = LocalSchedulerScaffold(
         enabled=scheduler_enabled_from_env() if enabled is None else enabled,
@@ -470,6 +839,23 @@ def build_scheduler(
         minute=DAILY_REPORT_UTC_MINUTE,
         metadata={"source": "nova_alpha_report", "output": "reports/daily_{date}.md"},
     )
+    # Position monitor: same 5-minute cadence as tier0. Opt-in via
+    # DAVEY_POSITION_MONITOR_ENABLED=1 (or explicit flag) so default scheduler
+    # shape stays unchanged for existing deterministic smokes.
+    if (
+        position_monitor_enabled
+        if position_monitor_enabled is not None
+        else position_monitor_enabled_from_env()
+    ):
+        scheduler.register_interval_job(
+            POSITION_MONITOR_JOB_ID,
+            lambda: run_position_monitor(
+                repo_root=repo_root,
+                session_id=session_id,
+            ),
+            seconds=POSITION_MONITOR_INTERVAL_SECONDS,
+            metadata={"source": "exit_plan_monitor"},
+        )
     return scheduler
 
 
@@ -787,11 +1173,11 @@ def start(
     prefer_apscheduler: bool = True,
     fetcher: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    \"\"\"Register the market watcher job and start only when env-enabled.
+    """Register the market watcher job and start only when env-enabled.
 
     Importing this module has no scheduler side effects. This explicit entry
     point is safe for one-cycle verification and for MCP server startup.
-    \"\"\"
+    """
     global _ACTIVE_SCHEDULER
 
     enabled = scheduler_enabled_from_env()

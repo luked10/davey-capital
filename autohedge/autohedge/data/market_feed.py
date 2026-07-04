@@ -73,14 +73,20 @@ HIGH_PRIORITY = ("NVDA", "MU", "AMD", "TSLA")
 # Auto-pinged on a >3% move OR >2x 20-day average volume.
 MEDIUM_PRIORITY = ("META", "GOOGL", "AMZN", "AAPL", "MSFT", "PLTR", "ARM", "SMCI")
 
+# Regime-detection inputs: data only, NEVER tradeable. They live in WATCH_ONLY
+# for scanning/overview purposes but every injection/execution path must
+# reject them (see DATA_ONLY_SYMBOLS guard in the MCP server).
+DATA_ONLY_SYMBOLS = ("SPY", "^VIX")
+
 # yfinance + PatternTool only — never auto-pinged (cost saving). Poke can still
-# call inject_researched_candidate manually for any of these.
+# call inject_researched_candidate manually for any of these, EXCEPT the
+# DATA_ONLY_SYMBOLS which are rejected at injection.
 WATCH_ONLY = (
     "NFLX", "AVGO", "QCOM", "ASML", "MCHP", "MRVL", "CRM", "ADBE",
     "SNOW", "CRWD", "OKTA", "DDOG", "CRDO", "RBLX", "SOUN", "IONQ",
     "MSTR", "COIN", "HOOD", "SOFI", "UPST", "AFRM", "NU", "SHOP",
     "SPOT", "UBER", "LYFT", "NET", "BILL", "PATH",
-)
+) + DATA_ONLY_SYMBOLS
 
 # Actively auto-pinged universe (HIGH + MEDIUM). Kept named WATCH_SYMBOLS for
 # backwards compatibility with the market overview / research tools.
